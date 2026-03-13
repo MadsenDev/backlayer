@@ -19,6 +19,8 @@ This repo is for building Backlayer: a Hyprland-first animated wallpaper runtime
 - If scope changes, update both `PROJECT_SUMMARY.md` and `TODO.md` together.
 - Prefer adding new tasks rather than keeping important work only in memory.
 - Keep docs aligned with reality; do not leave completed architecture decisions undocumented.
+- When making a user-visible release change, bump the relevant version(s) in the same change set when practical.
+- Maintain `CHANGELOG.md` from this point forward; add notable changes to `Unreleased` and cut version sections when versions are bumped.
 
 ## Engineering Reminders
 
@@ -44,3 +46,4 @@ Progress means shipped, checkable outcomes:
 - Do not silently change scope.
 - Do not build optional polish before the core runtime works.
 - Do not treat the UI as the product; the runtime is the product.
+- Do not ship version bumps without updating `CHANGELOG.md`.
