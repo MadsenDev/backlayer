@@ -1,0 +1,22 @@
+[package]
+name = "backlayer-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2.5.6", features = [] }
+
+[dependencies]
+backlayer-config.workspace = true
+backlayer-types.workspace = true
+anyhow.workspace = true
+base64 = "0.22.1"
+image = { version = "0.25.8", default-features = true, features = ["jpeg", "png", "pnm", "webp"] }
+serde.workspace = true
+serde_json.workspace = true
+tauri = { version = "2.10.3", features = [] }
+
+[features]
+default = []

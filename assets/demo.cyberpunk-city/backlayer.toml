@@ -1,0 +1,6 @@
+id = "demo.cyberpunk-city"
+name = "Cyberpunk City"
+kind = "image"
+animated = false
+image_fit = "cover"
+entrypoint = "images/cyberpunk-city.png"

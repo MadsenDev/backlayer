@@ -1,0 +1,15 @@
+[package]
+name = "shader-runner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+backlayer-hyprland.workspace = true
+backlayer-renderer-shader.workspace = true
+backlayer-types.workspace = true
+backlayer-wayland.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

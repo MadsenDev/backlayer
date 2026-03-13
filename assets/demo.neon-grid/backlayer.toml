@@ -1,0 +1,5 @@
+id = "demo.neon-grid"
+name = "Neon Grid"
+kind = "shader"
+animated = false
+entrypoint = "shaders/neon-grid.wgsl"

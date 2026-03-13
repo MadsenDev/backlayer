@@ -1,0 +1,6 @@
+id = "demo.sunset-stripes"
+name = "Sunset Stripes"
+kind = "image"
+animated = false
+image_fit = "cover"
+entrypoint = "images/sunset-stripes.ppm"

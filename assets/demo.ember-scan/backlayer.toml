@@ -1,0 +1,5 @@
+id = "demo.ember-scan"
+name = "Ember Scan"
+kind = "shader"
+animated = false
+entrypoint = "shaders/ember-scan.wgsl"

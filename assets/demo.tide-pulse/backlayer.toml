@@ -1,0 +1,5 @@
+id = "demo.tide-pulse"
+name = "Tide Pulse"
+kind = "shader"
+animated = true
+entrypoint = "shaders/tide-pulse.wgsl"
