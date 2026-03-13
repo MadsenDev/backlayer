@@ -1,0 +1,10 @@
+[package]
+name = "backlayer-renderer-video"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+backlayer-types.workspace = true
+thiserror.workspace = true

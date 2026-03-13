@@ -1,0 +1,19 @@
+[package]
+name = "backlayerd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+backlayer-config.workspace = true
+backlayer-hyprland.workspace = true
+backlayer-renderer-image.workspace = true
+backlayer-renderer-shader.workspace = true
+backlayer-renderer-video.workspace = true
+backlayer-types.workspace = true
+backlayer-wayland.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

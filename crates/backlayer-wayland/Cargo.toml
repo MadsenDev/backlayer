@@ -1,0 +1,14 @@
+[package]
+name = "backlayer-wayland"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+raw-window-handle = "0.6.2"
+serde.workspace = true
+smithay-client-toolkit = "0.20.0"
+thiserror.workspace = true
+wayland-client = { version = "0.31.13", features = ["system"] }
+wgpu.workspace = true

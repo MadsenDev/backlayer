@@ -1,0 +1,15 @@
+[package]
+name = "backlayer-config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+backlayer-types.workspace = true
+base64 = "0.22.1"
+image = { version = "0.25.8", default-features = true, features = ["jpeg", "png", "pnm", "webp"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+toml.workspace = true

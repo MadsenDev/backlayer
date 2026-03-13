@@ -1,0 +1,15 @@
+[package]
+name = "backlayer-renderer-shader"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+backlayer-wayland.workspace = true
+backlayer-types.workspace = true
+bytemuck = { version = "1.23.2", features = ["derive"] }
+naga = { version = "26.0.0", features = ["wgsl-in"] }
+pollster = "0.4.0"
+thiserror.workspace = true
+wgpu.workspace = true

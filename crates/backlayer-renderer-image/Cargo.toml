@@ -1,0 +1,15 @@
+[package]
+name = "backlayer-renderer-image"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+backlayer-types.workspace = true
+backlayer-wayland.workspace = true
+bytemuck = { version = "1.23.2", features = ["derive"] }
+image = { version = "0.25.8", default-features = true, features = ["gif", "jpeg", "pnm", "png", "webp"] }
+pollster = "0.4.0"
+thiserror.workspace = true
+wgpu.workspace = true
