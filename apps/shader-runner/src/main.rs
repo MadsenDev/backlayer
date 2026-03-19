@@ -12,6 +12,8 @@ use backlayer_types::{AssetMetadata, AssetSourceKind, CompatibilityInfo, Wallpap
 use backlayer_wayland::LayerShellRuntime;
 use tracing::info;
 
+const POLICY_CHECK_INTERVAL: Duration = Duration::from_millis(250);
+
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter("shader_runner=info,backlayer=info")
@@ -53,6 +55,7 @@ fn main() -> Result<()> {
         compatibility: CompatibilityInfo::default(),
         import_metadata: None,
         entrypoint: asset_entrypoint,
+        asset_path: None,
     };
     let mut shader_runtime = renderer
         .create_runtime(&asset, &session)
@@ -72,7 +75,6 @@ fn main() -> Result<()> {
     let hyprland = HyprlandClient::new();
     let power = PowerStateProbe::default();
     let mut next_frame_at = Instant::now();
-    let mut rendered_first_frame = true;
 
     shader_runtime
         .render_frame()
@@ -82,31 +84,30 @@ fn main() -> Result<()> {
     }
 
     loop {
+        let now = Instant::now();
         let paused_for_fullscreen =
             pause_on_fullscreen && hyprland.fullscreen_active().unwrap_or(false);
         let paused_for_battery = pause_on_battery && power.on_battery().unwrap_or(false);
         let paused = paused_for_fullscreen || paused_for_battery;
 
-        if !paused {
-            if shader_runtime.animated() {
-                if Instant::now() >= next_frame_at {
-                    shader_runtime
-                        .render_frame()
-                        .map_err(|error| anyhow!(error.to_string()))?;
-                    next_frame_at = Instant::now() + frame_interval;
-                }
-            } else if !rendered_first_frame {
-                shader_runtime
-                    .render_frame()
-                    .map_err(|error| anyhow!(error.to_string()))?;
-                rendered_first_frame = true;
-            }
+        if !paused && shader_runtime.animated() && now >= next_frame_at {
+            shader_runtime
+                .render_frame()
+                .map_err(|error| anyhow!(error.to_string()))?;
+            next_frame_at = now + frame_interval;
         }
 
         session
             .dispatch_pending()
             .map_err(|error| anyhow!("wayland dispatch failed: {error}"))?;
-        thread::sleep(Duration::from_millis(16));
+        let sleep_for = if paused || !shader_runtime.animated() {
+            POLICY_CHECK_INTERVAL
+        } else {
+            next_frame_at
+                .saturating_duration_since(Instant::now())
+                .min(POLICY_CHECK_INTERVAL)
+        };
+        thread::sleep(sleep_for);
     }
 }
 

@@ -8,8 +8,8 @@ use std::{
 
 use backlayer_config::ConfigStore;
 use backlayer_types::{
-    AssetMetadata, AssignmentSettings, CreateSceneAssetRequest, DaemonRequest, DaemonResponse,
-    DaemonState, EditableSceneAsset, FeatureFlags, PausePolicy,
+    AssetMetadata, AssignmentSettings, CreateNativeAssetRequest, CreateSceneAssetRequest,
+    DaemonRequest, DaemonResponse, DaemonState, EditableSceneAsset, FeatureFlags, PausePolicy,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use image::ImageFormat;
@@ -88,6 +88,21 @@ async fn daemon_update_assignment_settings(
             Err(error) => Err(error),
         }
     })
+    .await
+}
+
+#[tauri::command]
+async fn daemon_create_native_asset(
+    request: CreateNativeAssetRequest,
+) -> Result<AssetMetadata, String> {
+    run_blocking(
+        move || match daemon_request(DaemonRequest::CreateNativeAsset { request }) {
+            Ok(DaemonResponse::Asset { asset }) => Ok(asset),
+            Ok(DaemonResponse::Error { message }) => Err(message),
+            Ok(other) => Err(format!("unexpected daemon response: {other:?}")),
+            Err(error) => Err(error),
+        },
+    )
     .await
 }
 
@@ -255,6 +270,7 @@ fn main() {
             daemon_list_assets,
             daemon_feature_flags,
             daemon_assign_wallpaper,
+            daemon_create_native_asset,
             daemon_create_scene_asset,
             daemon_load_editable_scene_asset,
             daemon_update_assignment_settings,

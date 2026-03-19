@@ -1,12 +1,14 @@
 import { motion } from 'framer-motion'
-import { startTransition, useDeferredValue, useEffect, useRef, useState } from 'react'
+import { memo, startTransition, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import type { ChangeEvent, ReactNode } from 'react'
+import { convertFileSrc } from '@tauri-apps/api/core'
 import {
   FiActivity,
   FiAlertCircle,
   FiCpu,
   FiDisc,
   FiDownload,
+  FiFilm,
   FiFilter,
   FiImage,
   FiMonitor,
@@ -18,6 +20,7 @@ import {
 } from 'react-icons/fi'
 import {
   assignWallpaper,
+  createNativeAsset,
   createSceneAsset,
   fetchRuntimeSnapshot,
   importWorkshopPath,
@@ -32,6 +35,7 @@ import {
 import type {
   AssetMetadata,
   AssignmentSettings,
+  CreateNativeAssetRequest,
   CreateSceneAssetRequest,
   CreateSceneImageSourceRequest,
   EditableSceneImage,
@@ -46,6 +50,9 @@ import type {
   SceneEffectKind,
   SceneEmitterPreset,
   SceneNode,
+  SceneNormalizedRect,
+  SceneNormalizedPoint,
+  SceneParticleAreaNode,
   SceneSpriteNode,
 } from './types'
 
@@ -59,7 +66,11 @@ type ComposerUploadImage = {
   key: string
   name: string
   filename: string
-  dataUrl: string
+  sourceUrl: string
+  dataUrl?: string | null
+  path?: string | null
+  width?: number | null
+  height?: number | null
 }
 type EditableScalarPoint = {
   id: string
@@ -72,11 +83,13 @@ type EditableColorStop = {
   color_hex: string
 }
 type ComposerLeftTab = 'layers' | 'assets' | 'add'
+type ComposerViewportTool = 'select' | 'move' | 'scale' | 'rotate' | 'region' | 'polygon'
 type AssetContextMenuState = {
   assetId: string
   x: number
   y: number
 }
+type CreateAssetKind = 'image' | 'scene' | 'shader' | 'video'
 
 const THEME_PREFERENCE_KEY = 'backlayer.theme.preference'
 const SCENE_EFFECT_OPTIONS: Array<{
@@ -387,6 +400,18 @@ function resolveEmitterParticleImageKey(node: SceneEmitterNode) {
   return value ? value : null
 }
 
+function resolveEmitterParticleRotationDeg(node: SceneEmitterNode) {
+  return clampDegrees(node.particle_rotation_deg ?? 0)
+}
+
+function resolveRenderedParticleAngleRad(node: SceneEmitterNode, vx: number, vy: number) {
+  const offsetRad = (resolveEmitterParticleRotationDeg(node) * Math.PI) / 180
+  if (node.preset === 'rain') {
+    return Math.atan2(vy, vx) - (Math.PI / 2) + offsetRad
+  }
+  return offsetRad
+}
+
 function resolveScalarCurve(points: SceneCurvePoint[] | undefined, fallback: SceneCurvePoint[]) {
   const next = (points && points.length > 0 ? points : fallback).map((point) => ({
     x: clamp01(point.x),
@@ -475,11 +500,13 @@ function App() {
   const [monitorPickerOpen, setMonitorPickerOpen] = useState(false)
   const [advancedOpen, setAdvancedOpen] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
+  const [createName, setCreateName] = useState('')
   const [importPath, setImportPath] = useState('')
   const [suggestedWorkshopPaths, setSuggestedWorkshopPaths] = useState<string[]>([])
   const [importResult, setImportResult] = useState<AssetMetadata[]>([])
   const [assetSearch, setAssetSearch] = useState('')
   const [filtersOpen, setFiltersOpen] = useState(false)
+  const [createPickerOpen, setCreatePickerOpen] = useState(false)
   const [sourceFilter, setSourceFilter] = useState<'all' | 'native' | 'wallpaper_engine_import'>('all')
   const [kindFilter, setKindFilter] = useState<'all' | 'image' | 'video' | 'shader' | 'scene' | 'web'>('all')
   const [compatibilityFilter, setCompatibilityFilter] = useState<'all' | 'supported' | 'partial' | 'unsupported'>('all')
@@ -489,29 +516,47 @@ function App() {
   const [composerUploadImage, setComposerUploadImage] = useState<ComposerUploadImage | null>(null)
   const [composerExtraImages, setComposerExtraImages] = useState<ComposerUploadImage[]>([])
   const [composerEditingAssetId, setComposerEditingAssetId] = useState<string | null>(null)
+  const [composerLoadingScene, setComposerLoadingScene] = useState(false)
   const [composerNodes, setComposerNodes] = useState<SceneNode[]>(() => buildDefaultComposerNodes())
   const [selectedComposerNodeId, setSelectedComposerNodeId] = useState<string | null>(null)
   const [composerLeftTab, setComposerLeftTab] = useState<ComposerLeftTab>('layers')
+  const [composerViewportTool, setComposerViewportTool] = useState<ComposerViewportTool>('select')
   const [particleEditorNodeId, setParticleEditorNodeId] = useState<string | null>(null)
   const [notice, setNotice] = useState<UINotice | null>(null)
   const [assetContextMenu, setAssetContextMenu] = useState<AssetContextMenuState | null>(null)
   const [themePreference, setThemePreference] = useState<ThemePreference>(() => readThemePreference())
   const [systemTheme, setSystemTheme] = useState<ActiveTheme>(() => detectSystemTheme())
+  const [documentVisible, setDocumentVisible] = useState(() => typeof document === 'undefined' ? true : !document.hidden)
+  const [disconnectedPollMs, setDisconnectedPollMs] = useState(5000)
   const composerFileInputRef = useRef<HTMLInputElement | null>(null)
   const composerSpriteFileInputRef = useRef<HTMLInputElement | null>(null)
+  const createImageFileInputRef = useRef<HTMLInputElement | null>(null)
+  const createVideoFileInputRef = useRef<HTMLInputElement | null>(null)
+  const createShaderFileInputRef = useRef<HTMLInputElement | null>(null)
 
-  async function refreshSnapshot() {
-    const nextSnapshot = await fetchRuntimeSnapshot()
+  async function refreshSnapshot(includeAssets = false) {
+    const nextSnapshot = await fetchRuntimeSnapshot({
+      includeAssets,
+    })
     startTransition(() => {
-      setSnapshot(nextSnapshot)
+      setSnapshot((current) => ({
+        ...nextSnapshot,
+        assets: includeAssets ? nextSnapshot.assets : current?.assets ?? nextSnapshot.assets,
+      }))
       setLoading(false)
     })
+    if (nextSnapshot.source === 'tauri_disconnected') {
+      setDisconnectedPollMs((current) => Math.min(current * 2, 30000))
+    } else {
+      setDisconnectedPollMs(5000)
+    }
+    return nextSnapshot
   }
 
   useEffect(() => {
     let cancelled = false
 
-    void fetchRuntimeSnapshot().then((nextSnapshot) => {
+    void fetchRuntimeSnapshot({ includeAssets: true }).then((nextSnapshot) => {
       if (cancelled) {
         return
       }
@@ -528,18 +573,35 @@ function App() {
   }, [])
 
   useEffect(() => {
+    const updateVisibility = () => {
+      setDocumentVisible(!document.hidden)
+    }
+    document.addEventListener('visibilitychange', updateVisibility)
+    window.addEventListener('focus', updateVisibility)
+    window.addEventListener('blur', updateVisibility)
+    return () => {
+      document.removeEventListener('visibilitychange', updateVisibility)
+      window.removeEventListener('focus', updateVisibility)
+      window.removeEventListener('blur', updateVisibility)
+    }
+  }, [])
+
+  useEffect(() => {
     if (snapshot?.source !== 'tauri' && snapshot?.source !== 'tauri_disconnected') {
       return
     }
 
-    const interval = window.setInterval(() => {
-      void refreshSnapshot().catch(() => {})
-    }, 2000)
+    const intervalMs = snapshot.source === 'tauri_disconnected'
+      ? disconnectedPollMs
+      : documentVisible ? 5000 : 30000
+    const timeout = window.setTimeout(() => {
+      void refreshSnapshot(false).catch(() => {})
+    }, intervalMs)
 
     return () => {
-      window.clearInterval(interval)
+      window.clearTimeout(timeout)
     }
-  }, [snapshot?.source])
+  }, [disconnectedPollMs, documentVisible, snapshot?.source])
 
   const assignments = snapshot?.state.assignments ?? []
   const monitors = snapshot?.state.monitors ?? []
@@ -557,7 +619,7 @@ function App() {
     compatibilityFilter !== 'all' ? compatibilityFilter : null,
   ].filter(Boolean) as string[]
   const activeTheme: ActiveTheme = themePreference === 'system' ? systemTheme : themePreference
-  const filteredAssets = assets.filter((asset) => {
+  const filteredAssets = useMemo(() => assets.filter((asset) => {
     const search = deferredAssetSearch.trim().toLowerCase()
     const matchesSearch =
       search.length === 0
@@ -571,28 +633,33 @@ function App() {
       compatibilityFilter === 'all' || asset.compatibility.status === compatibilityFilter
 
     return matchesSearch && matchesSource && matchesKind && matchesCompatibility
-  })
-  const selectedMonitor =
+  }), [assets, compatibilityFilter, deferredAssetSearch, kindFilter, sourceFilter])
+  const selectedMonitor = useMemo(() =>
     monitors.find((monitor) => monitor.id === selectedMonitorId)
     ?? monitors.find((monitor) => monitor.focused)
     ?? monitors[0]
     ?? null
-  const selectedAssignment = selectedMonitor
+  , [monitors, selectedMonitorId])
+  const selectedAssignment = useMemo(() => selectedMonitor
     ? assignments.find(
         ({ monitor_id }) =>
           monitor_id === selectedMonitor.id || monitor_id === selectedMonitor.output_name,
       ) ?? null
     : null
-  const selectedAsset =
+  , [assignments, selectedMonitor])
+  const selectedAsset = useMemo(() =>
     assets.find((asset) => asset.id === selectedAssetId)
     ?? selectedAssignment?.wallpaper
     ?? assets[0]
     ?? null
+  , [assets, selectedAssetId, selectedAssignment])
   const composerBaseAsset = composerBaseAssetId
     ? assets.find((asset) => asset.id === composerBaseAssetId) ?? null
     : null
   const composerSourceName = composerUploadImage?.name ?? composerBaseAsset?.name ?? null
-  const selectedComposerNode = composerNodes.find((node) => node.id === selectedComposerNodeId) ?? composerNodes[0] ?? null
+  const selectedComposerNode = useMemo(() =>
+    composerNodes.find((node) => node.id === selectedComposerNodeId) ?? composerNodes[0] ?? null
+  , [composerNodes, selectedComposerNodeId])
   const particleEditorNodeCandidate = composerNodes.find((node) => node.id === particleEditorNodeId) ?? null
   const particleEditorNode = particleEditorNodeCandidate?.kind === 'emitter' ? particleEditorNodeCandidate : null
   const selectedRuntime = selectedMonitor
@@ -634,6 +701,17 @@ function App() {
       setSelectedComposerNodeId(composerNodes[0]?.id ?? null)
     }
   }, [composerNodes, composerOpen, selectedComposerNodeId])
+
+  useEffect(() => {
+    if (!selectedComposerNode) {
+      setComposerViewportTool('select')
+      return
+    }
+    const allowedTools = resolveViewportToolsForNode(selectedComposerNode)
+    if (!allowedTools.includes(composerViewportTool)) {
+      setComposerViewportTool('select')
+    }
+  }, [composerViewportTool, selectedComposerNode])
 
   useEffect(() => {
     if (!notice) {
@@ -732,7 +810,7 @@ function App() {
     setUiError(null)
     try {
       await assignWallpaper(monitorId, assetId)
-      await refreshSnapshot()
+      await refreshSnapshot(false)
     } catch (error) {
       setUiError(error instanceof Error ? error.message : String(error))
     } finally {
@@ -745,7 +823,7 @@ function App() {
     setUiError(null)
     try {
       await updatePausePolicy(nextPause)
-      await refreshSnapshot()
+      await refreshSnapshot(false)
     } catch (error) {
       setUiError(error instanceof Error ? error.message : String(error))
     } finally {
@@ -761,7 +839,7 @@ function App() {
     setUiError(null)
     try {
       await updateAssignmentSettings(monitorId, settings)
-      await refreshSnapshot()
+      await refreshSnapshot(false)
     } catch (error) {
       setUiError(error instanceof Error ? error.message : String(error))
     } finally {
@@ -773,7 +851,7 @@ function App() {
     setBusy('refresh')
     setUiError(null)
     try {
-      await refreshSnapshot()
+      await refreshSnapshot(true)
     } catch (error) {
       setUiError(error instanceof Error ? error.message : String(error))
     } finally {
@@ -799,7 +877,7 @@ function App() {
         setCompatibilityFilter('all')
         setAssetSearch('')
       }
-      await refreshSnapshot()
+      await refreshSnapshot(true)
     } catch (error) {
       setUiError(error instanceof Error ? error.message : String(error))
     } finally {
@@ -812,7 +890,7 @@ function App() {
     setUiError(null)
     try {
       await reimportAsset(assetId)
-      await refreshSnapshot()
+      await refreshSnapshot(true)
     } catch (error) {
       setUiError(error instanceof Error ? error.message : String(error))
     } finally {
@@ -828,7 +906,7 @@ function App() {
       if (selectedAssetId === assetId) {
         setSelectedAssetId(null)
       }
-      await refreshSnapshot()
+      await refreshSnapshot(true)
     } catch (error) {
       setUiError(error instanceof Error ? error.message : String(error))
     } finally {
@@ -845,13 +923,15 @@ function App() {
     const request: CreateSceneAssetRequest = {
       name: composerName.trim() || `${composerSourceName ?? 'Scene'} Scene`,
       existing_asset_id: composerEditingAssetId,
-      base_asset_id: composerUploadImage ? null : composerBaseAsset?.id ?? null,
+      base_asset_id: composerUploadImage?.dataUrl ? null : composerBaseAsset?.id ?? null,
       base_image_data_url: composerUploadImage?.dataUrl ?? null,
       base_image_filename: composerUploadImage?.filename ?? null,
+      base_image_path: composerUploadImage?.dataUrl ? null : composerUploadImage?.path ?? null,
       extra_images: composerExtraImages.map((image) => ({
         key: image.key,
-        data_url: image.dataUrl,
         filename: image.filename,
+        data_url: image.dataUrl ?? null,
+        existing_path: image.dataUrl ? null : image.path ?? null,
       })) satisfies CreateSceneImageSourceRequest[],
       nodes: composerNodes,
     }
@@ -860,7 +940,7 @@ function App() {
     setUiError(null)
     try {
       const asset = await createSceneAsset(request)
-      await refreshSnapshot()
+      await refreshSnapshot(true)
       setSelectedAssetId(asset.id)
       setKindFilter('all')
       setComposerOpen(false)
@@ -885,8 +965,12 @@ function App() {
     }
   }
 
-  function openComposer(initialAsset: AssetMetadata | null = selectedAsset) {
+  function openComposer(
+    initialAsset: AssetMetadata | null = selectedAsset,
+    preferredName?: string,
+  ) {
     setUiError(null)
+    setComposerLoadingScene(false)
     setComposerOpen(true)
     setComposerNodes(buildDefaultComposerNodes())
     setSelectedComposerNodeId('sprite-base')
@@ -897,15 +981,17 @@ function App() {
     if (initialAsset?.kind === 'image') {
       setSelectedAssetId(initialAsset.id)
       setComposerBaseAssetId(initialAsset.id)
-      setComposerName(`${initialAsset.name} Scene`)
+      setComposerName(preferredName?.trim() || `${initialAsset.name} Scene`)
     } else {
       setComposerBaseAssetId(null)
-      setComposerName('')
+      setComposerName(preferredName?.trim() || '')
     }
+    setCreateName('')
   }
 
 function closeComposer() {
     setComposerOpen(false)
+    setComposerLoadingScene(false)
     setComposerName('')
     setComposerBaseAssetId(null)
     setComposerUploadImage(null)
@@ -917,8 +1003,17 @@ function closeComposer() {
   }
 
   async function openComposerForExistingScene(asset: AssetMetadata) {
-    setBusy(`load-scene:${asset.id}`)
     setUiError(null)
+    setComposerOpen(true)
+    setComposerLoadingScene(true)
+    setComposerEditingAssetId(asset.id)
+    setComposerBaseAssetId(null)
+    setComposerUploadImage(null)
+    setComposerExtraImages([])
+    setComposerNodes(buildDefaultComposerNodes())
+    setSelectedComposerNodeId(null)
+    setComposerLeftTab('layers')
+    setBusy(`load-scene:${asset.id}`)
     try {
       const editable = await loadEditableSceneAsset(asset.id)
       const baseImage = editable.images.find((image) => image.key === 'base')
@@ -930,11 +1025,13 @@ function closeComposer() {
         key: image.key,
         name: image.filename.replace(/\.[^.]+$/, '') || image.key,
         filename: image.filename,
-        dataUrl: image.data_url,
+        sourceUrl: convertFileSrc(image.path),
+        path: image.path,
+        width: image.width ?? null,
+        height: image.height ?? null,
       })
 
       setSelectedAssetId(asset.id)
-      setComposerOpen(true)
       setComposerEditingAssetId(asset.id)
       setComposerBaseAssetId(null)
       setComposerUploadImage(toComposerImage(baseImage))
@@ -944,8 +1041,10 @@ function closeComposer() {
       setComposerName(editable.asset.name)
       setComposerLeftTab('layers')
     } catch (error) {
+      setComposerOpen(false)
       setUiError(error instanceof Error ? error.message : String(error))
     } finally {
+      setComposerLoadingScene(false)
       setBusy(null)
     }
   }
@@ -966,18 +1065,62 @@ function closeComposer() {
     setComposerLeftTab('assets')
   }
 
+  async function readFileAsDataUrl(file: File, errorMessage: string) {
+    return await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(String(reader.result ?? ''))
+      reader.onerror = () => reject(new Error(errorMessage))
+      reader.readAsDataURL(file)
+    })
+  }
+
+  async function handleCreateNativeAssetFilePicked(
+    event: ChangeEvent<HTMLInputElement>,
+    kind: Extract<CreateAssetKind, 'image' | 'video' | 'shader'>,
+  ) {
+    const file = event.currentTarget.files?.[0]
+    if (!file) {
+      return
+    }
+
+    setBusy(`create-native:${kind}`)
+    setUiError(null)
+    try {
+      const dataUrl = await readFileAsDataUrl(file, `Failed to read ${kind} file.`)
+      if (!dataUrl) {
+        throw new Error(`Failed to read ${kind} file.`)
+      }
+
+      const request: CreateNativeAssetRequest = {
+        name: createName.trim() || file.name.replace(/\.[^.]+$/, '') || `Imported ${kind}`,
+        kind,
+        data_url: dataUrl,
+        filename: file.name,
+      }
+      const asset = await createNativeAsset(request)
+      await refreshSnapshot(true)
+      setSelectedAssetId(asset.id)
+      setCreatePickerOpen(false)
+      setCreateName('')
+      setNotice({
+        title: `${asset.name} created`,
+        detail: `${asset.name} is now available in the wallpaper browser as a native ${asset.kind} asset.`,
+      })
+    } catch (error) {
+      setUiError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setBusy(null)
+      event.currentTarget.value = ''
+    }
+  }
+
   async function handleComposerFilePicked(event: ChangeEvent<HTMLInputElement>) {
     const file = event.currentTarget.files?.[0]
     if (!file) {
       return
     }
 
-    const dataUrl = await new Promise<string>((resolve, reject) => {
-      const reader = new FileReader()
-      reader.onload = () => resolve(String(reader.result ?? ''))
-      reader.onerror = () => reject(new Error('Failed to read image file.'))
-      reader.readAsDataURL(file)
-    }).catch((error) => {
+    const dataUrl = await readFileAsDataUrl(file, 'Failed to read image file.').catch((error) => {
       setUiError(error instanceof Error ? error.message : String(error))
       return ''
     })
@@ -993,6 +1136,7 @@ function closeComposer() {
       key: 'base',
       name: baseName,
       filename: file.name,
+      sourceUrl: dataUrl,
       dataUrl,
     })
     setComposerExtraImages([])
@@ -1009,12 +1153,7 @@ function closeComposer() {
       return
     }
 
-    const dataUrl = await new Promise<string>((resolve, reject) => {
-      const reader = new FileReader()
-      reader.onload = () => resolve(String(reader.result ?? ''))
-      reader.onerror = () => reject(new Error('Failed to read sprite image file.'))
-      reader.readAsDataURL(file)
-    }).catch((error) => {
+    const dataUrl = await readFileAsDataUrl(file, 'Failed to read sprite image file.').catch((error) => {
       setUiError(error instanceof Error ? error.message : String(error))
       return ''
     })
@@ -1030,6 +1169,7 @@ function closeComposer() {
       key,
       name: baseName,
       filename: file.name,
+      sourceUrl: dataUrl,
       dataUrl,
     }
 
@@ -1085,11 +1225,11 @@ function closeComposer() {
               </button>
               <button
                 className="toolbar-button"
-                onClick={() => openComposer()}
+                onClick={() => setCreatePickerOpen(true)}
                 type="button"
               >
                 <FiImage className="size-4" />
-                Create Scene
+                Create
               </button>
               <button
                 className="toolbar-button"
@@ -1770,6 +1910,117 @@ function closeComposer() {
         </div>
       ) : null}
 
+      <input
+        ref={createImageFileInputRef}
+        accept="image/png,image/jpeg,image/webp,image/x-portable-pixmap"
+        className="hidden"
+        onChange={(event) => {
+          void handleCreateNativeAssetFilePicked(event, 'image')
+        }}
+        type="file"
+      />
+      <input
+        ref={createVideoFileInputRef}
+        accept="video/mp4,video/webm,video/quicktime,.mkv"
+        className="hidden"
+        onChange={(event) => {
+          void handleCreateNativeAssetFilePicked(event, 'video')
+        }}
+        type="file"
+      />
+      <input
+        ref={createShaderFileInputRef}
+        accept=".wgsl,text/plain"
+        className="hidden"
+        onChange={(event) => {
+          void handleCreateNativeAssetFilePicked(event, 'shader')
+        }}
+        type="file"
+      />
+
+      {createPickerOpen ? (
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/55 p-6 backdrop-blur-sm">
+          <div className="glass-panel w-full max-w-[860px] overflow-hidden">
+            <div className="flex items-center justify-between border-b border-white/10 px-5 py-4">
+              <div>
+                <div className="section-title">Create Wallpaper</div>
+                <div className="mt-1 text-sm text-slate-300">Choose a native wallpaper type to add to the library.</div>
+              </div>
+              <button
+                className="icon-button"
+                onClick={() => setCreatePickerOpen(false)}
+                type="button"
+              >
+                <FiX className="size-4" />
+              </button>
+            </div>
+            <div className="border-b border-white/10 px-5 py-4">
+              <label className="block">
+                <span className="mb-2 block text-xs uppercase tracking-[0.18em] text-slate-400">Wallpaper name</span>
+                <input
+                  className="field-shell w-full"
+                  onChange={(event) => setCreateName(event.currentTarget.value)}
+                  placeholder="Optional. Defaults to the file name."
+                  type="text"
+                  value={createName}
+                />
+              </label>
+            </div>
+            <div className="grid gap-4 p-5 md:grid-cols-2">
+              {[
+                {
+                  kind: 'image' as const,
+                  icon: <FiImage className="size-5" />,
+                  title: 'Still Image',
+                  detail: 'Import a local image as a managed native wallpaper asset.',
+                  action: () => createImageFileInputRef.current?.click(),
+                },
+                {
+                  kind: 'scene' as const,
+                  icon: <FiActivity className="size-5" />,
+                  title: 'Scene',
+                  detail: 'Open the Scene Composer to build a native real-time scene wallpaper.',
+                  action: () => {
+                    setCreatePickerOpen(false)
+                    openComposer(undefined, createName.trim() || undefined)
+                  },
+                },
+                {
+                  kind: 'shader' as const,
+                  icon: <FiZap className="size-5" />,
+                  title: 'Shader',
+                  detail: 'Import a local WGSL shader as a managed native shader wallpaper asset.',
+                  action: () => createShaderFileInputRef.current?.click(),
+                },
+                {
+                  kind: 'video' as const,
+                  icon: <FiFilm className="size-5" />,
+                  title: 'Video',
+                  detail: 'Import a local video file as a managed native video wallpaper asset.',
+                  action: () => createVideoFileInputRef.current?.click(),
+                },
+              ].map((option) => (
+                <button
+                  key={option.kind}
+                  className="surface-panel flex min-h-[152px] flex-col items-start gap-4 p-5 text-left transition hover:border-white/20 hover:bg-white/[0.05]"
+                  disabled={Boolean(busy)}
+                  onClick={option.action}
+                  type="button"
+                >
+                  <div className="flex size-11 items-center justify-center border border-white/10 bg-white/[0.04] text-slate-100">
+                    {option.icon}
+                  </div>
+                  <div>
+                    <div className="text-base font-semibold text-white">{option.title}</div>
+                    <div className="mt-2 text-sm leading-6 text-slate-400">{option.detail}</div>
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       {workshopEnabled && importOpen ? (
         <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/55 p-6 backdrop-blur-sm">
           <div className="glass-panel w-full max-w-[640px] overflow-hidden">
@@ -1929,7 +2180,7 @@ function closeComposer() {
                 </label>
                 <button
                   className="primary-button shrink-0 disabled:cursor-not-allowed disabled:opacity-60"
-                  disabled={busy === 'create-scene' || (!composerBaseAsset && !composerUploadImage)}
+                  disabled={composerLoadingScene || busy === 'create-scene' || (!composerBaseAsset && !composerUploadImage)}
                   onClick={() => {
                     void handleCreateScene()
                   }}
@@ -2157,6 +2408,23 @@ function closeComposer() {
                             <span className="text-[11px] uppercase tracking-[0.16em] text-slate-400">Emitter</span>
                           </button>
                         ))}
+                        <button
+                          className="secondary-button w-full justify-between"
+                          onClick={() => {
+                            const node = createComposerParticleAreaNode()
+                            setComposerNodes((items) => [...items, node])
+                            setSelectedComposerNodeId(node.id)
+                            setComposerViewportTool('region')
+                            setComposerLeftTab('layers')
+                          }}
+                          type="button"
+                        >
+                          <span className="inline-flex items-center gap-2">
+                            <FiFilter className="size-4" />
+                            Particle Area
+                          </span>
+                          <span className="text-[11px] uppercase tracking-[0.16em] text-slate-400">Area</span>
+                        </button>
                       </div>
                     </div>
                   ) : null}
@@ -2172,28 +2440,55 @@ function closeComposer() {
                     </div>
                   </div>
                   <div className="flex items-center gap-2">
+                    {selectedComposerNode ? (
+                      <div className="flex items-center gap-1">
+                        {resolveViewportToolsForNode(selectedComposerNode).map((tool) => (
+                          <button
+                            key={tool}
+                            className={[
+                              'secondary-button px-2 py-1.5 text-xs uppercase tracking-[0.14em]',
+                              composerViewportTool === tool ? 'border-cyan-300/40 text-cyan-100' : '',
+                            ].join(' ')}
+                            onClick={() => setComposerViewportTool(tool)}
+                            type="button"
+                          >
+                            {viewportToolLabel(tool)}
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
                     {selectedComposerNode ? <span className="control-chip">{selectedComposerNode.kind}</span> : null}
                     {composerSourceName ? <span className="control-chip">{composerSourceName}</span> : null}
                   </div>
                 </div>
                 <div className="h-full min-h-0 p-4">
-                  {composerBaseAsset || composerUploadImage ? (
+                  {composerLoadingScene ? (
+                    <div className="flex h-full items-center justify-center">
+                      <div className="surface-muted max-w-md p-6 text-center">
+                        <div className="section-title">Loading scene</div>
+                        <div className="mt-2 text-sm text-slate-400">
+                          Opening the editor shell first, then hydrating the scene images and nodes.
+                        </div>
+                      </div>
+                    </div>
+                  ) : composerBaseAsset || composerUploadImage ? (
                     <ComposerEnginePreview
                       asset={composerBaseAsset}
+                      documentVisible={documentVisible}
+                      paused={particleEditorNode !== null}
                       nodes={composerNodes}
                       extraImages={composerExtraImages}
-                      uploadedImageDataUrl={composerUploadImage?.dataUrl ?? null}
-                      selectedEmitter={selectedComposerNode?.kind === 'emitter' ? selectedComposerNode : null}
+                      activeTool={composerViewportTool}
+                      previewTargetSize={selectedMonitor ? {
+                        width: selectedMonitor.width,
+                        height: selectedMonitor.height,
+                        label: selectedMonitor.output_name,
+                      } : null}
+                      uploadedImagePath={composerUploadImage?.path ?? null}
+                      uploadedImageUrl={composerUploadImage?.sourceUrl ?? null}
                       selectedNode={selectedComposerNode}
-                      onPlaceEmitter={(originX, originY) => {
-                        if (!selectedComposerNode || selectedComposerNode.kind !== 'emitter') {
-                          return
-                        }
-                        const nextNode: SceneEmitterNode = {
-                          ...selectedComposerNode,
-                          origin_x: originX,
-                          origin_y: originY,
-                        }
+                      onSelectNode={(nodeId) => setSelectedComposerNodeId(nodeId)}
+                      onChangeNode={(nextNode) => {
                         setComposerNodes((items) => items.map((item) => (item.id === nextNode.id ? nextNode : item)))
                       }}
                       saving={busy === 'create-scene'}
@@ -2226,8 +2521,13 @@ function closeComposer() {
                         { key: 'base', label: composerSourceName ?? 'Base image' },
                         ...composerExtraImages.map((image) => ({ key: image.key, label: image.name })),
                       ]}
+                      viewportTool={composerViewportTool}
                       node={selectedComposerNode}
                       onOpenParticleEditor={(nodeId) => setParticleEditorNodeId(nodeId)}
+                      onActivateViewportTool={(nodeId, tool) => {
+                        setSelectedComposerNodeId(nodeId)
+                        setComposerViewportTool(tool)
+                      }}
                       onChange={(nextNode) => {
                         setComposerNodes((items) => items.map((item) => (item.id === nextNode.id ? nextNode : item)))
                       }}
@@ -2263,6 +2563,7 @@ function closeComposer() {
                   { key: 'base', label: composerSourceName ?? 'Base image' },
                   ...composerExtraImages.map((image) => ({ key: image.key, label: image.name })),
                 ]}
+                documentVisible={documentVisible}
                 node={particleEditorNode}
                 onClose={() => setParticleEditorNodeId(null)}
                 onSave={(nextNode) => {
@@ -2342,6 +2643,9 @@ function buildDefaultComposerNodes(): SceneNode[] {
       scale: 1,
       rotation_deg: 0,
       opacity: 1,
+      particle_occluder: false,
+      particle_surface: false,
+      particle_region: null,
       behaviors: [],
     },
     {
@@ -2386,6 +2690,9 @@ function createComposerSpriteNode(imageKey: string, name: string): SceneNode {
     scale: 1,
     rotation_deg: 0,
     opacity: 0.92,
+    particle_occluder: false,
+    particle_surface: false,
+    particle_region: null,
     behaviors: [{
       kind: 'drift',
       speed: 0.6,
@@ -2430,9 +2737,29 @@ function createComposerEmitterNode(preset: SceneEmitterPreset): SceneNode {
     drag: preset === 'dust' ? 1.4 : preset === 'snow' ? 0.9 : 0.5,
     color_hex: defaultEmitterColorHex(preset),
     particle_image_key: null,
+    particle_rotation_deg: 0,
     size_curve: defaultEmitterSizeCurve(preset),
     alpha_curve: defaultEmitterAlphaCurve(preset),
     color_curve: defaultEmitterColorCurve(preset),
+  }
+}
+
+function createComposerParticleAreaNode(): SceneNode {
+  return {
+    kind: 'particle_area',
+    id: `particle-area-${Date.now().toString(36)}`,
+    name: 'Particle area',
+    enabled: true,
+    shape: 'rect',
+    region: {
+      x: 0.25,
+      y: 0.25,
+      width: 0.5,
+      height: 0.2,
+    },
+    points: [],
+    occluder: true,
+    surface: false,
   }
 }
 
@@ -2469,11 +2796,10 @@ function uniqueComposerImageKey(baseKey: string, images: ComposerUploadImage[]):
 }
 
 function isUserManagedAsset(asset: AssetMetadata) {
+  const assetPath = asset.asset_path ?? ''
   return (
     asset.source_kind === 'wallpaper_engine_import'
-    || (asset.source_kind === 'native'
-      && (asset.entrypoint.includes('/.config/backlayer/assets/')
-        || asset.preview_image?.includes('/.config/backlayer/assets/')))
+    || (asset.source_kind === 'native' && assetPath.includes('/.config/backlayer/assets/'))
   )
 }
 
@@ -2501,8 +2827,8 @@ function assetSummary(asset: AssetMetadata) {
   }
 
   return asset.source_kind === 'wallpaper_engine_import'
-    ? 'Imported Wallpaper Engine video item. Import works, but video playback is still unfinished.'
-    : 'Video wallpaper support is still planned, not implemented.'
+    ? 'Imported Wallpaper Engine video item. Backlayer can now play video through the dedicated video runner, with libmpv and hardware decode still pending.'
+    : 'Video wallpaper running through the dedicated FFmpeg-backed video runner.'
 }
 
 function importRuntimeNote(kind: AssetMetadata['kind']) {
@@ -2512,7 +2838,7 @@ function importRuntimeNote(kind: AssetMetadata['kind']) {
     case 'web':
       return 'Imported Wallpaper Engine web items currently render a narrow static subset: a local HTML image, a parsed background color, or the preview fallback. Real browser-backed wallpaper playback is not implemented yet.'
     case 'video':
-      return 'Imported Wallpaper Engine video items currently use a static preview fallback. Real video playback and animation are not implemented yet.'
+      return 'Imported Wallpaper Engine video items now use first-pass FFmpeg-backed playback in video-runner. libmpv integration and hardware decode are still not finished.'
     default:
       return 'Native Backlayer scene assets use a real-time scene graph with sprites, effects, and particle emitters.'
   }
@@ -2769,12 +3095,39 @@ function ImageFitControl({
   )
 }
 
-function AssetPreview({ asset }: { asset: AssetMetadata }) {
+const AssetPreview = memo(function AssetPreview({ asset }: { asset: AssetMetadata }) {
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
+  const [visible, setVisible] = useState(false)
+  const containerRef = useRef<HTMLDivElement | null>(null)
   const previewPath = asset.preview_image ?? (asset.kind === 'image' ? asset.entrypoint : null)
 
   useEffect(() => {
+    const node = containerRef.current
+    if (!node || typeof IntersectionObserver === 'undefined') {
+      setVisible(true)
+      return
+    }
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          setVisible(true)
+          observer.disconnect()
+        }
+      },
+      { rootMargin: '240px' },
+    )
+    observer.observe(node)
+    return () => {
+      observer.disconnect()
+    }
+  }, [])
+
+  useEffect(() => {
     let cancelled = false
+
+    if (!visible) {
+      return
+    }
 
     if (!previewPath) {
       setPreviewUrl(null)
@@ -2796,17 +3149,18 @@ function AssetPreview({ asset }: { asset: AssetMetadata }) {
     return () => {
       cancelled = true
     }
-  }, [previewPath])
+  }, [previewPath, visible])
 
   return (
     <div
+      ref={containerRef}
       className="h-full w-full bg-cover bg-center"
       style={{ backgroundImage: `url("${previewUrl ?? assetPreviewDataUri(asset)}")` }}
     />
   )
-}
+})
 
-function AssetCard({
+const AssetCard = memo(function AssetCard({
   asset,
   selected,
   workshopEnabled,
@@ -2896,42 +3250,432 @@ function AssetCard({
       </div>
     </div>
   )
+})
+
+function pointInRect(x: number, y: number, rect: { x: number; y: number; width: number; height: number }) {
+  return x >= rect.x && x <= rect.x + rect.width && y >= rect.y && y <= rect.y + rect.height
 }
+
+function distanceBetween(ax: number, ay: number, bx: number, by: number) {
+  return Math.hypot(ax - bx, ay - by)
+}
+
+function resolveEmitterViewportOverlay(
+  emitter: SceneEmitterNode,
+  width: number,
+  _height: number,
+) {
+  const originX = resolveEmitterOriginX(emitter)
+  const originY = resolveEmitterOriginY(emitter)
+  const directionDeg = resolveEmitterDirectionDeg(emitter)
+  const directionRadians = (directionDeg * Math.PI) / 180
+  const directionHandleDistance = 56 / Math.max(width, 1)
+  const shape = resolveEmitterShape(emitter)
+  const shapeHandle = (() => {
+    if (shape === 'box') {
+      return {
+        x: originX + (resolveEmitterRegionWidth(emitter) / 2),
+        y: originY + (resolveEmitterRegionHeight(emitter) / 2),
+      }
+    }
+    if (shape === 'circle') {
+      return {
+        x: originX + resolveEmitterRegionRadius(emitter),
+        y: originY,
+      }
+    }
+    if (shape === 'line') {
+      const halfLength = resolveEmitterLineLength(emitter) / 2
+      const angle = (resolveEmitterLineAngleDeg(emitter) * Math.PI) / 180
+      return {
+        x: originX + (Math.cos(angle) * halfLength),
+        y: originY + (Math.sin(angle) * halfLength),
+      }
+    }
+    return { x: originX, y: originY }
+  })()
+
+  return {
+    shape,
+    originX,
+    originY,
+    directionDeg,
+    directionHandleX: originX + (Math.cos(directionRadians) * directionHandleDistance),
+    directionHandleY: originY + (Math.sin(directionRadians) * directionHandleDistance),
+    shapeHandleX: shapeHandle.x,
+    shapeHandleY: shapeHandle.y,
+    regionWidth: resolveEmitterRegionWidth(emitter),
+    regionHeight: resolveEmitterRegionHeight(emitter),
+    regionRadius: resolveEmitterRegionRadius(emitter),
+    lineLength: resolveEmitterLineLength(emitter),
+    lineAngleDeg: resolveEmitterLineAngleDeg(emitter),
+  }
+}
+
+function resolveParticleAreaOverlay(
+  area: SceneParticleAreaNode,
+  width: number,
+  height: number,
+) {
+  if ((area.shape ?? 'rect') === 'polygon') {
+    return {
+      kind: 'polygon' as const,
+      points: (area.points ?? []).map((point) => ({
+        x: width * point.x,
+        y: height * point.y,
+        leftPercent: point.x * 100,
+        topPercent: point.y * 100,
+      })),
+    }
+  }
+  return {
+    kind: 'rect' as const,
+    x: width * area.region.x,
+    y: height * area.region.y,
+    width: width * area.region.width,
+    height: height * area.region.height,
+    leftPercent: area.region.x * 100,
+    topPercent: area.region.y * 100,
+    widthPercent: area.region.width * 100,
+    heightPercent: area.region.height * 100,
+    handleLeftPercent: (area.region.x + area.region.width) * 100,
+    handleTopPercent: (area.region.y + area.region.height) * 100,
+  }
+}
+
+function resolveViewportHint(
+  selectedNode: SceneNode | null,
+  activeTool: ComposerViewportTool,
+) {
+  if (!selectedNode) {
+    return null
+  }
+  if (selectedNode.kind === 'sprite' && activeTool === 'region') {
+    return 'Drag in the viewport to draw a particle region for the selected sprite.'
+  }
+  if (selectedNode.kind === 'particle_area' && activeTool === 'region') {
+    return 'Drag in the viewport to draw a rectangular particle area.'
+  }
+  if (selectedNode.kind === 'particle_area' && activeTool === 'polygon') {
+    return 'Click to add polygon points, or drag existing points directly in the viewport.'
+  }
+  if (selectedNode.kind === 'emitter' && activeTool === 'rotate') {
+    return 'Drag the direction handle to aim the emitter.'
+  }
+  if (selectedNode.kind === 'emitter' && activeTool === 'scale') {
+    return 'Drag the shape handle to resize the emitter region.'
+  }
+  return null
+}
+
+function resolveViewportSelection(
+  nodes: SceneNode[],
+  images: Map<string, HTMLImageElement>,
+  previewSize: { width: number; height: number },
+  canvasX: number,
+  canvasY: number,
+) {
+  const ordered = [...nodes].reverse()
+  for (const node of ordered) {
+    if (!node.enabled) {
+      continue
+    }
+    if (node.kind === 'sprite') {
+      const image = images.get(node.image_key)
+      if (!image) {
+        continue
+      }
+      const layout = resolveComposerSpriteLayoutFromBounds(previewSize.width, previewSize.height, image, node, 0)
+      if (pointInRect(canvasX, canvasY, layout)) {
+        return node
+      }
+    }
+    if (node.kind === 'particle_area') {
+      const overlay = resolveParticleAreaOverlay(node, previewSize.width, previewSize.height)
+      if (overlay.kind === 'rect' && pointInRect(canvasX, canvasY, overlay)) {
+        return node
+      }
+      if (overlay.kind === 'polygon' && pointInPolygon(overlay.points, canvasX, canvasY)) {
+        return node
+      }
+    }
+    if (node.kind === 'emitter') {
+      const overlay = resolveEmitterViewportOverlay(node, previewSize.width, previewSize.height)
+      if (distanceBetween(canvasX, canvasY, overlay.originX * previewSize.width, overlay.originY * previewSize.height) <= 14) {
+        return node
+      }
+    }
+  }
+  return null
+}
+
+function resolveSelectedViewportHandle(
+  selectedNode: SceneNode,
+  activeTool: ComposerViewportTool,
+  canvasX: number,
+  canvasY: number,
+  previewSize: { width: number; height: number },
+  images: Map<string, HTMLImageElement>,
+): PreviewInteraction | null {
+  if (selectedNode.kind === 'sprite') {
+    const image = images.get(selectedNode.image_key)
+    if (!image) {
+      return null
+    }
+    const layout = resolveComposerSpriteLayoutFromBounds(previewSize.width, previewSize.height, image, selectedNode, 0)
+    const scaleHandleX = layout.x + layout.width
+    const scaleHandleY = layout.y + layout.height
+    const rotateHandleX = layout.x + (layout.width / 2)
+    const rotateHandleY = layout.y - 20
+    if ((activeTool === 'scale' || activeTool === 'select') && distanceBetween(canvasX, canvasY, scaleHandleX, scaleHandleY) <= 16) {
+      return {
+        kind: 'sprite-scale',
+        nodeId: selectedNode.id,
+        centerX: layout.x + (layout.width / 2),
+        centerY: layout.y + (layout.height / 2),
+        startDistance: distanceBetween(canvasX, canvasY, layout.x + (layout.width / 2), layout.y + (layout.height / 2)),
+        startScale: selectedNode.scale,
+      }
+    }
+    if ((activeTool === 'rotate' || activeTool === 'select') && distanceBetween(canvasX, canvasY, rotateHandleX, rotateHandleY) <= 18) {
+      return {
+        kind: 'sprite-rotate',
+        nodeId: selectedNode.id,
+        centerX: layout.x + (layout.width / 2),
+        centerY: layout.y + (layout.height / 2),
+        startAngle: Math.atan2(canvasY - (layout.y + (layout.height / 2)), canvasX - (layout.x + (layout.width / 2))),
+        startRotationDeg: selectedNode.rotation_deg,
+      }
+    }
+    return null
+  }
+  if (selectedNode.kind === 'emitter') {
+    const overlay = resolveEmitterViewportOverlay(selectedNode, previewSize.width, previewSize.height)
+    const originX = overlay.originX * previewSize.width
+    const originY = overlay.originY * previewSize.height
+    if (distanceBetween(canvasX, canvasY, overlay.directionHandleX * previewSize.width, overlay.directionHandleY * previewSize.height) <= 16) {
+      return {
+        kind: 'emitter-direction',
+        nodeId: selectedNode.id,
+        originX: overlay.originX,
+        originY: overlay.originY,
+      }
+    }
+    if (distanceBetween(canvasX, canvasY, overlay.shapeHandleX * previewSize.width, overlay.shapeHandleY * previewSize.height) <= 16) {
+      return {
+        kind: 'emitter-shape',
+        nodeId: selectedNode.id,
+        shape: overlay.shape,
+        startWidth: overlay.regionWidth,
+        startHeight: overlay.regionHeight,
+        startRadius: overlay.regionRadius,
+        startLength: overlay.lineLength,
+        startAngleDeg: overlay.lineAngleDeg,
+        originX: overlay.originX,
+        originY: overlay.originY,
+      }
+    }
+    if (distanceBetween(canvasX, canvasY, originX, originY) <= 16) {
+      return {
+        kind: 'emitter-origin',
+        nodeId: selectedNode.id,
+      }
+    }
+    return null
+  }
+  if (selectedNode.kind === 'particle_area') {
+    if ((selectedNode.shape ?? 'rect') === 'polygon') {
+      const overlay = resolveParticleAreaOverlay(selectedNode, previewSize.width, previewSize.height)
+      if (overlay.kind === 'polygon') {
+        const index = overlay.points.findIndex((point) => distanceBetween(canvasX, canvasY, point.x, point.y) <= 12)
+        if (index >= 0) {
+          return {
+            kind: 'area-vertex',
+            nodeId: selectedNode.id,
+            vertexIndex: index,
+          }
+        }
+      }
+      return null
+    }
+    const overlay = resolveParticleAreaOverlay(selectedNode, previewSize.width, previewSize.height)
+    if (overlay.kind === 'rect') {
+      if ((activeTool === 'scale' || activeTool === 'select') && distanceBetween(canvasX, canvasY, overlay.x + overlay.width, overlay.y + overlay.height) <= 16) {
+        return {
+          kind: 'area-resize',
+          nodeId: selectedNode.id,
+          startRegion: selectedNode.region,
+          anchorX: selectedNode.region.x,
+          anchorY: selectedNode.region.y,
+        }
+      }
+    }
+  }
+  return null
+}
+
+function viewportToolLabel(tool: ComposerViewportTool) {
+  switch (tool) {
+    case 'select':
+      return 'Select'
+    case 'move':
+      return 'Move'
+    case 'scale':
+      return 'Scale'
+    case 'rotate':
+      return 'Rotate'
+    case 'region':
+      return 'Region'
+    case 'polygon':
+      return 'Polygon'
+  }
+}
+
+function resolveViewportToolsForNode(node: SceneNode): ComposerViewportTool[] {
+  if (node.kind === 'sprite') {
+    return ['select', 'move', 'scale', 'rotate', 'region']
+  }
+  if (node.kind === 'emitter') {
+    return ['select', 'move', 'scale', 'rotate']
+  }
+  if (node.kind === 'particle_area') {
+    return (node.shape ?? 'rect') === 'polygon'
+      ? ['select', 'polygon']
+      : ['select', 'move', 'scale', 'region']
+  }
+  return ['select']
+}
+
+type PreviewInteraction =
+  | {
+      kind: 'sprite-move'
+      nodeId: string
+      startNormX: number
+      startNormY: number
+      startX: number
+      startY: number
+    }
+  | {
+      kind: 'sprite-scale'
+      nodeId: string
+      centerX: number
+      centerY: number
+      startDistance: number
+      startScale: number
+    }
+  | {
+      kind: 'sprite-rotate'
+      nodeId: string
+      centerX: number
+      centerY: number
+      startAngle: number
+      startRotationDeg: number
+    }
+  | {
+      kind: 'sprite-region'
+      nodeId: string
+      startNormX: number
+      startNormY: number
+    }
+  | {
+      kind: 'emitter-origin'
+      nodeId: string
+    }
+  | {
+      kind: 'emitter-direction'
+      nodeId: string
+      originX: number
+      originY: number
+    }
+  | {
+      kind: 'emitter-shape'
+      nodeId: string
+      shape: SceneEmitterShape
+      startWidth: number
+      startHeight: number
+      startRadius: number
+      startLength: number
+      startAngleDeg: number
+      originX: number
+      originY: number
+    }
+  | {
+      kind: 'area-move'
+      nodeId: string
+      startNormX: number
+      startNormY: number
+      startRegion: SceneNormalizedRect
+    }
+  | {
+      kind: 'area-resize'
+      nodeId: string
+      startRegion: SceneNormalizedRect
+      anchorX: number
+      anchorY: number
+    }
+  | {
+      kind: 'area-draw'
+      nodeId: string
+      startNormX: number
+      startNormY: number
+    }
+  | {
+      kind: 'area-vertex'
+      nodeId: string
+      vertexIndex: number
+    }
 
 function ComposerEnginePreview({
   asset,
+  activeTool,
+  documentVisible,
   extraImages,
-  onPlaceEmitter,
+  onChangeNode,
+  onSelectNode,
+  paused,
+  previewTargetSize,
   selectedNode,
-  selectedEmitter,
-  uploadedImageDataUrl,
+  uploadedImagePath,
+  uploadedImageUrl,
   nodes,
   saving,
 }: {
   asset: AssetMetadata | null
+  activeTool: ComposerViewportTool
+  documentVisible: boolean
   extraImages: ComposerUploadImage[]
-  onPlaceEmitter: (originX: number, originY: number) => void
+  onChangeNode: (node: SceneNode) => void
+  onSelectNode: (nodeId: string) => void
+  paused: boolean
+  previewTargetSize: { width: number; height: number; label: string } | null
   selectedNode: SceneNode | null
-  selectedEmitter: SceneEmitterNode | null
-  uploadedImageDataUrl: string | null
+  uploadedImagePath: string | null
+  uploadedImageUrl: string | null
   nodes: SceneNode[]
   saving: boolean
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
+  const viewportRef = useRef<HTMLDivElement | null>(null)
+  const loadedImagesRef = useRef<Map<string, HTMLImageElement>>(new Map())
+  const interactionRef = useRef<PreviewInteraction | null>(null)
+  const nodesRef = useRef(nodes)
+  const selectedNodeRef = useRef(selectedNode)
+  const dragParticleRegionRef = useRef<SceneNormalizedRect | null>(null)
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
   const [previewSize, setPreviewSize] = useState({ width: 1280, height: 720 })
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
-  const previewPath = uploadedImageDataUrl
+  const [dragParticleRegion, setDragParticleRegion] = useState<SceneNormalizedRect | null>(null)
+  const [interactionActive, setInteractionActive] = useState(false)
+  const previewPath = uploadedImageUrl
     ? null
     : asset?.preview_image ?? (asset?.kind === 'image' ? asset.entrypoint : null)
 
   useEffect(() => {
     let cancelled = false
 
-    if (uploadedImageDataUrl) {
-      setPreviewUrl(uploadedImageDataUrl)
-      setLoading(false)
+    if (uploadedImageUrl) {
+      setPreviewUrl(uploadedImageUrl)
       setLoadError(null)
       return
     }
@@ -2949,7 +3693,6 @@ function ComposerEnginePreview({
       .then((url) => {
         if (!cancelled) {
           setPreviewUrl(url)
-          setLoading(false)
         }
       })
       .catch((error) => {
@@ -2963,96 +3706,429 @@ function ComposerEnginePreview({
     return () => {
       cancelled = true
     }
-  }, [previewPath, uploadedImageDataUrl])
+  }, [previewPath, uploadedImageUrl])
+
+  useEffect(() => {
+    nodesRef.current = nodes
+  }, [nodes])
+
+  useEffect(() => {
+    selectedNodeRef.current = selectedNode
+  }, [selectedNode])
+
+  useEffect(() => {
+    dragParticleRegionRef.current = dragParticleRegion
+  }, [dragParticleRegion])
 
   useEffect(() => {
     const canvas = canvasRef.current
-    if (!canvas || !previewUrl) {
+    if (!canvas) {
+      return
+    }
+
+    if (!previewUrl) {
+      setLoading(false)
       return
     }
 
     const context = canvas.getContext('2d')
     if (!context) {
+      setLoading(false)
       return
     }
 
     let disposed = false
     let frameHandle = 0
     const imageMap = new Map<string, HTMLImageElement>()
-    const loadImage = (key: string, src: string) =>
+    setLoading(true)
+    setLoadError(null)
+    const loadImage = (key: string, src: string, fallbackPath?: string | null) =>
       new Promise<void>((resolve, reject) => {
         const image = new Image()
-        image.crossOrigin = 'anonymous'
         image.onload = () => {
           imageMap.set(key, image)
           resolve()
         }
-        image.onerror = () => reject(new Error(`Failed to load image ${key}`))
+        image.onerror = () => {
+          if (!fallbackPath) {
+            reject(new Error(`Failed to load image ${key}`))
+            return
+          }
+          void loadAssetPreviewDataUrl(fallbackPath)
+            .then((fallbackUrl) => {
+              if (!fallbackUrl) {
+                reject(new Error(`Failed to load image ${key}`))
+                return
+              }
+              const fallbackImage = new Image()
+              fallbackImage.onload = () => {
+                imageMap.set(key, fallbackImage)
+                resolve()
+              }
+              fallbackImage.onerror = () => reject(new Error(`Failed to decode image ${key}`))
+              fallbackImage.src = fallbackUrl
+            })
+            .catch(() => reject(new Error(`Failed to load image ${key}`)))
+        }
         image.src = src
       })
 
     Promise.all([
-      loadImage('base', previewUrl),
-      ...extraImages.map((image) => loadImage(image.key, image.dataUrl)),
-    ])
+      loadImage('base', previewUrl, uploadedImagePath),
+      ...extraImages.map((image) => loadImage(image.key, image.sourceUrl, image.path)),
+      ])
       .then(() => {
+        if (disposed) {
+          return
+        }
+        loadedImagesRef.current = imageMap
+        setLoading(false)
         const startedAt = performance.now()
+        let lastRenderedAt = 0
+        let lastSizeKey = ''
         const render = (now: number) => {
           if (disposed) {
             return
           }
-          const baseImage = imageMap.get('base')
-          if (baseImage && (canvas.width !== baseImage.naturalWidth || canvas.height !== baseImage.naturalHeight)) {
-            canvas.width = Math.max(1, baseImage.naturalWidth)
-            canvas.height = Math.max(1, baseImage.naturalHeight)
-            setPreviewSize({
-              width: Math.max(1, baseImage.naturalWidth),
-              height: Math.max(1, baseImage.naturalHeight),
-            })
+          if (!documentVisible || paused) {
+            frameHandle = window.requestAnimationFrame(render)
+            return
           }
-          drawComposerSceneFrame(context, imageMap, nodes, (now - startedAt) / 1000)
+          const baseImage = imageMap.get('base')
+          const logicalWidth = Math.max(1, previewTargetSize?.width ?? baseImage?.naturalWidth ?? 1280)
+          const logicalHeight = Math.max(1, previewTargetSize?.height ?? baseImage?.naturalHeight ?? 720)
+          const maxLongEdge = interactionActive ? 960 : 1280
+          const scale = Math.min(1, maxLongEdge / Math.max(logicalWidth, logicalHeight))
+          const targetWidth = Math.max(1, Math.round(logicalWidth * scale))
+          const targetHeight = Math.max(1, Math.round(logicalHeight * scale))
+          if (canvas.width !== targetWidth || canvas.height !== targetHeight) {
+            canvas.width = targetWidth
+            canvas.height = targetHeight
+          }
+          const sizeKey = `${targetWidth}x${targetHeight}`
+          if (sizeKey !== lastSizeKey) {
+            lastSizeKey = sizeKey
+            setPreviewSize({ width: targetWidth, height: targetHeight })
+          }
+          const frameIntervalMs = 1000 / (interactionActive ? 20 : 24)
+          if (now - lastRenderedAt >= frameIntervalMs) {
+            drawComposerSceneFrame(
+              context,
+              imageMap,
+              nodesRef.current,
+              selectedNodeRef.current,
+              dragParticleRegionRef.current,
+              (now - startedAt) / 1000,
+            )
+            lastRenderedAt = now
+          }
           frameHandle = window.requestAnimationFrame(render)
         }
         render(startedAt)
       })
       .catch(() => {
         if (!disposed) {
+          setLoading(false)
           setLoadError('Failed to decode scene source image for preview.')
         }
       })
 
     return () => {
       disposed = true
+      loadedImagesRef.current = new Map()
       window.cancelAnimationFrame(frameHandle)
     }
-  }, [extraImages, nodes, previewUrl])
+  }, [
+    documentVisible,
+    extraImages,
+    interactionActive,
+    paused,
+    previewTargetSize?.height,
+    previewTargetSize?.width,
+    uploadedImagePath,
+    previewUrl,
+  ])
+
+  useEffect(() => {
+    if (activeTool !== 'region') {
+      setDragParticleRegion(null)
+    }
+  }, [activeTool])
+
+  const selectedSpriteLayout = (() => {
+    if (!selectedNode || selectedNode.kind !== 'sprite') {
+      return null
+    }
+    const image = loadedImagesRef.current.get(selectedNode.image_key)
+    if (!image) {
+      return null
+    }
+    return resolveComposerSpriteLayoutFromBounds(previewSize.width, previewSize.height, image, selectedNode, 0)
+  })()
+  const selectedEmitterOverlay = selectedNode?.kind === 'emitter'
+    ? resolveEmitterViewportOverlay(selectedNode, previewSize.width, previewSize.height)
+    : null
+  const selectedParticleAreaOverlay = selectedNode?.kind === 'particle_area'
+    ? resolveParticleAreaOverlay(selectedNode, previewSize.width, previewSize.height)
+    : null
+  const toolHint = resolveViewportHint(selectedNode, activeTool)
+
+  const updateSelectedNode = (updater: (node: SceneNode) => SceneNode) => {
+    if (!selectedNode) {
+      return
+    }
+    onChangeNode(updater(selectedNode))
+  }
+
+  const pointerToPreview = (event: React.PointerEvent<HTMLDivElement>) => {
+    const target = event.currentTarget
+    const rect = target.getBoundingClientRect()
+    const x = clamp01((event.clientX - rect.left) / Math.max(rect.width, 1))
+    const y = clamp01((event.clientY - rect.top) / Math.max(rect.height, 1))
+    return {
+      normalizedX: x,
+      normalizedY: y,
+      canvasX: x * previewSize.width,
+      canvasY: y * previewSize.height,
+      rect,
+    }
+  }
+
+  const commitDragRegion = () => {
+    if (!selectedNode || activeTool !== 'region' || !dragParticleRegion) {
+      return
+    }
+    if (selectedNode.kind === 'sprite') {
+      onChangeNode({ ...selectedNode, particle_region: dragParticleRegion })
+    }
+    if (selectedNode.kind === 'particle_area' && (selectedNode.shape ?? 'rect') === 'rect') {
+      onChangeNode({ ...selectedNode, region: dragParticleRegion })
+    }
+  }
 
   return (
     <div className="flex h-full min-h-[360px] items-center justify-center">
       <div
+        ref={viewportRef}
         className={[
           'relative w-full overflow-hidden border border-white/10 bg-slate-950/90',
-          selectedEmitter ? 'cursor-crosshair' : '',
+          selectedNode ? 'cursor-default' : '',
         ].join(' ')}
         onPointerDown={(event) => {
-          if (!selectedEmitter) {
+          const pointer = pointerToPreview(event)
+          if (!selectedNode) {
             return
           }
-          const target = event.currentTarget
-          const rect = target.getBoundingClientRect()
-          const originX = clamp01((event.clientX - rect.left) / Math.max(rect.width, 1))
-          const originY = clamp01((event.clientY - rect.top) / Math.max(rect.height, 1))
-          onPlaceEmitter(originX, originY)
+
+          if (selectedNode.kind === 'particle_area' && (selectedNode.shape ?? 'rect') === 'polygon' && activeTool === 'polygon') {
+            const points = [...(selectedNode.points ?? []), { x: pointer.normalizedX, y: pointer.normalizedY }]
+            onChangeNode({
+              ...selectedNode,
+              points,
+              region: polygonBounds(points) ?? selectedNode.region,
+            })
+            return
+          }
+
+          const selectedHandle = resolveSelectedViewportHandle(selectedNode, activeTool, pointer.canvasX, pointer.canvasY, previewSize, loadedImagesRef.current)
+          if (selectedHandle) {
+            event.currentTarget.setPointerCapture(event.pointerId)
+            interactionRef.current = selectedHandle
+            setInteractionActive(true)
+            return
+          }
+
+          const hitNode = resolveViewportSelection(nodes, loadedImagesRef.current, previewSize, pointer.canvasX, pointer.canvasY)
+          if (hitNode && hitNode.id !== selectedNode.id) {
+            onSelectNode(hitNode.id)
+            return
+          }
+
+          if (selectedNode.kind === 'sprite' && selectedSpriteLayout) {
+            if (activeTool === 'region') {
+              interactionRef.current = {
+                kind: 'sprite-region',
+                nodeId: selectedNode.id,
+                startNormX: pointer.normalizedX,
+                startNormY: pointer.normalizedY,
+              }
+              setDragParticleRegion({ x: pointer.normalizedX, y: pointer.normalizedY, width: 0.001, height: 0.001 })
+              event.currentTarget.setPointerCapture(event.pointerId)
+              setInteractionActive(true)
+              return
+            }
+            if (pointInRect(pointer.canvasX, pointer.canvasY, selectedSpriteLayout)) {
+              interactionRef.current = {
+                kind: 'sprite-move',
+                nodeId: selectedNode.id,
+                startNormX: pointer.normalizedX,
+                startNormY: pointer.normalizedY,
+                startX: selectedNode.x,
+                startY: selectedNode.y,
+              }
+              event.currentTarget.setPointerCapture(event.pointerId)
+              setInteractionActive(true)
+              return
+            }
+          }
+
+          if (selectedNode.kind === 'emitter') {
+            interactionRef.current = { kind: 'emitter-origin', nodeId: selectedNode.id }
+            updateSelectedNode((node) => node.kind === 'emitter' ? { ...node, origin_x: pointer.normalizedX, origin_y: pointer.normalizedY } : node)
+            event.currentTarget.setPointerCapture(event.pointerId)
+            setInteractionActive(true)
+            return
+          }
+
+          if (
+            selectedNode.kind === 'particle_area'
+            && (selectedNode.shape ?? 'rect') === 'rect'
+            && selectedParticleAreaOverlay
+            && selectedParticleAreaOverlay.kind === 'rect'
+          ) {
+            if (activeTool === 'region') {
+              interactionRef.current = {
+                kind: 'area-draw',
+                nodeId: selectedNode.id,
+                startNormX: pointer.normalizedX,
+                startNormY: pointer.normalizedY,
+              }
+              setDragParticleRegion({ x: pointer.normalizedX, y: pointer.normalizedY, width: 0.001, height: 0.001 })
+              event.currentTarget.setPointerCapture(event.pointerId)
+              setInteractionActive(true)
+              return
+            }
+            if (pointInRect(pointer.canvasX, pointer.canvasY, selectedParticleAreaOverlay)) {
+              interactionRef.current = {
+                kind: 'area-move',
+                nodeId: selectedNode.id,
+                startNormX: pointer.normalizedX,
+                startNormY: pointer.normalizedY,
+                startRegion: selectedNode.region,
+              }
+              event.currentTarget.setPointerCapture(event.pointerId)
+              setInteractionActive(true)
+            }
+          }
         }}
         onPointerMove={(event) => {
-          if (!selectedEmitter || (event.buttons & 1) === 0) {
+          const interaction = interactionRef.current
+          if (!interaction || !selectedNode || (event.buttons & 1) === 0) {
             return
           }
-          const target = event.currentTarget
-          const rect = target.getBoundingClientRect()
-          const originX = clamp01((event.clientX - rect.left) / Math.max(rect.width, 1))
-          const originY = clamp01((event.clientY - rect.top) / Math.max(rect.height, 1))
-          onPlaceEmitter(originX, originY)
+          const pointer = pointerToPreview(event)
+          if (interaction.kind === 'sprite-region' || interaction.kind === 'area-draw') {
+            setDragParticleRegion(normalizeDraggedRect(interaction.startNormX, interaction.startNormY, pointer.normalizedX, pointer.normalizedY))
+            return
+          }
+          if (selectedNode.id !== interaction.nodeId) {
+            return
+          }
+          if (selectedNode.kind === 'sprite') {
+            if (interaction.kind === 'sprite-move') {
+              onChangeNode({
+                ...selectedNode,
+                x: interaction.startX + ((pointer.normalizedX - interaction.startNormX) * previewSize.width),
+                y: interaction.startY + ((pointer.normalizedY - interaction.startNormY) * previewSize.height),
+              })
+              return
+            }
+            if (interaction.kind === 'sprite-scale') {
+              const distance = distanceBetween(pointer.canvasX, pointer.canvasY, interaction.centerX, interaction.centerY)
+              const scale = Math.max(0.1, interaction.startScale * (distance / Math.max(interaction.startDistance, 1)))
+              onChangeNode({ ...selectedNode, scale })
+              return
+            }
+            if (interaction.kind === 'sprite-rotate') {
+              const angle = Math.atan2(pointer.canvasY - interaction.centerY, pointer.canvasX - interaction.centerX)
+              onChangeNode({
+                ...selectedNode,
+                rotation_deg: interaction.startRotationDeg + (((angle - interaction.startAngle) * 180) / Math.PI),
+              })
+              return
+            }
+          }
+          if (selectedNode.kind === 'emitter') {
+            if (interaction.kind === 'emitter-origin') {
+              onChangeNode({ ...selectedNode, origin_x: pointer.normalizedX, origin_y: pointer.normalizedY })
+              return
+            }
+            if (interaction.kind === 'emitter-direction') {
+              const angle = Math.atan2(pointer.normalizedY - interaction.originY, pointer.normalizedX - interaction.originX)
+              onChangeNode({ ...selectedNode, direction_deg: (angle * 180) / Math.PI })
+              return
+            }
+            if (interaction.kind === 'emitter-shape') {
+              const deltaX = pointer.normalizedX - interaction.originX
+              const deltaY = pointer.normalizedY - interaction.originY
+              if (interaction.shape === 'box') {
+                onChangeNode({
+                  ...selectedNode,
+                  region_width: Math.max(0.02, Math.abs(deltaX) * 2),
+                  region_height: Math.max(0.02, Math.abs(deltaY) * 2),
+                })
+                return
+              }
+              if (interaction.shape === 'circle') {
+                onChangeNode({
+                  ...selectedNode,
+                  region_radius: Math.max(0.01, distanceBetween(pointer.normalizedX, pointer.normalizedY, interaction.originX, interaction.originY)),
+                })
+                return
+              }
+              if (interaction.shape === 'line') {
+                onChangeNode({
+                  ...selectedNode,
+                  line_length: Math.max(0.02, distanceBetween(pointer.normalizedX, pointer.normalizedY, interaction.originX, interaction.originY) * 2),
+                  line_angle_deg: (Math.atan2(deltaY, deltaX) * 180) / Math.PI,
+                })
+              }
+            }
+          }
+          if (selectedNode.kind === 'particle_area') {
+            if (interaction.kind === 'area-move') {
+              const nextX = clamp01(interaction.startRegion.x + (pointer.normalizedX - interaction.startNormX))
+              const nextY = clamp01(interaction.startRegion.y + (pointer.normalizedY - interaction.startNormY))
+              onChangeNode({
+                ...selectedNode,
+                region: {
+                  ...interaction.startRegion,
+                  x: Math.min(nextX, 1 - interaction.startRegion.width),
+                  y: Math.min(nextY, 1 - interaction.startRegion.height),
+                },
+              })
+              return
+            }
+            if (interaction.kind === 'area-resize') {
+              onChangeNode({
+                ...selectedNode,
+                region: normalizeDraggedRect(interaction.anchorX, interaction.anchorY, pointer.normalizedX, pointer.normalizedY),
+              })
+              return
+            }
+            if (interaction.kind === 'area-vertex') {
+              const points = [...(selectedNode.points ?? [])]
+              points[interaction.vertexIndex] = { x: pointer.normalizedX, y: pointer.normalizedY }
+              onChangeNode({
+                ...selectedNode,
+                points,
+                region: polygonBounds(points) ?? selectedNode.region,
+              })
+            }
+          }
+        }}
+        onPointerUp={(event) => {
+          if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+            event.currentTarget.releasePointerCapture(event.pointerId)
+          }
+          commitDragRegion()
+          interactionRef.current = null
+          setDragParticleRegion(null)
+          setInteractionActive(false)
+        }}
+        onPointerLeave={() => {
+          interactionRef.current = null
+          setInteractionActive(false)
         }}
         style={{ aspectRatio: `${previewSize.width} / ${previewSize.height}` }}
       >
@@ -3066,19 +4142,30 @@ function ComposerEnginePreview({
           <div className="pointer-events-none absolute left-4 top-4">
             <div className="surface-panel px-3 py-2 text-xs text-slate-200">
               <div className="font-medium text-slate-50">{selectedNode.name}</div>
-              <div className="mt-1 uppercase tracking-[0.16em] text-slate-400">{selectedNode.kind}</div>
+              <div className="mt-1 uppercase tracking-[0.16em] text-slate-400">{selectedNode.kind} · {viewportToolLabel(activeTool)}</div>
+              {previewTargetSize ? (
+                <div className="mt-1 text-[11px] text-slate-500">
+                  {previewTargetSize.label} · {previewSize.width}×{previewSize.height}
+                </div>
+              ) : null}
             </div>
           </div>
         ) : null}
-        {selectedEmitter ? (
-          <>
-            <EmitterViewportOverlay emitter={selectedEmitter} />
-            <div className="pointer-events-none absolute left-4 top-20">
-              <div className="surface-panel px-3 py-2 text-xs text-slate-200">
-                Click or drag in the viewport to place the selected emitter.
-              </div>
+        {toolHint ? (
+          <div className="pointer-events-none absolute left-4 top-20">
+            <div className="surface-panel px-3 py-2 text-xs text-slate-200">
+              {toolHint}
             </div>
-          </>
+          </div>
+        ) : null}
+        {selectedSpriteLayout ? (
+          <SpriteViewportOverlay activeTool={activeTool} layout={selectedSpriteLayout} previewSize={previewSize} />
+        ) : null}
+        {selectedEmitterOverlay ? (
+          <EmitterViewportOverlay activeTool={activeTool} overlay={selectedEmitterOverlay} />
+        ) : null}
+        {selectedParticleAreaOverlay ? (
+          <ParticleAreaViewportOverlay activeTool={activeTool} overlay={selectedParticleAreaOverlay} />
         ) : null}
         {loading ? (
           <div className="absolute inset-0 flex items-center justify-center bg-slate-950/55 backdrop-blur-sm">
@@ -3106,10 +4193,16 @@ function ComposerEnginePreview({
   )
 }
 
-function EmitterViewportOverlay({ emitter }: { emitter: SceneEmitterNode }) {
-  const left = `${resolveEmitterOriginX(emitter) * 100}%`
-  const top = `${resolveEmitterOriginY(emitter) * 100}%`
-  const shape = resolveEmitterShape(emitter)
+function EmitterViewportOverlay({
+  activeTool,
+  overlay,
+}: {
+  activeTool: ComposerViewportTool
+  overlay: ReturnType<typeof resolveEmitterViewportOverlay>
+}) {
+  const left = `${overlay.originX * 100}%`
+  const top = `${overlay.originY * 100}%`
+  const shape = overlay.shape
   const common = 'pointer-events-none absolute border border-cyan-200/70 bg-cyan-200/5'
   return (
     <>
@@ -3119,8 +4212,8 @@ function EmitterViewportOverlay({ emitter }: { emitter: SceneEmitterNode }) {
           style={{
             left,
             top,
-            width: `${resolveEmitterRegionWidth(emitter) * 100}%`,
-            height: `${resolveEmitterRegionHeight(emitter) * 100}%`,
+            width: `${overlay.regionWidth * 100}%`,
+            height: `${overlay.regionHeight * 100}%`,
             transform: 'translate(-50%, -50%)',
           }}
         />
@@ -3131,8 +4224,8 @@ function EmitterViewportOverlay({ emitter }: { emitter: SceneEmitterNode }) {
           style={{
             left,
             top,
-            width: `${resolveEmitterRegionRadius(emitter) * 200}%`,
-            height: `${resolveEmitterRegionRadius(emitter) * 200}%`,
+            width: `${overlay.regionRadius * 200}%`,
+            height: `${overlay.regionRadius * 200}%`,
             transform: 'translate(-50%, -50%)',
           }}
         />
@@ -3143,8 +4236,8 @@ function EmitterViewportOverlay({ emitter }: { emitter: SceneEmitterNode }) {
           style={{
             left,
             top,
-            width: `${resolveEmitterLineLength(emitter) * 100}%`,
-            transform: `translate(-50%, -50%) rotate(${resolveEmitterLineAngleDeg(emitter)}deg)`,
+            width: `${overlay.lineLength * 100}%`,
+            transform: `translate(-50%, -50%) rotate(${overlay.lineAngleDeg}deg)`,
             transformOrigin: 'center',
           }}
         />
@@ -3160,27 +4253,155 @@ function EmitterViewportOverlay({ emitter }: { emitter: SceneEmitterNode }) {
         }}
       />
       <div
+        className="pointer-events-none absolute rounded-full border border-cyan-100/90 bg-cyan-100"
+        style={{
+          left: `${overlay.directionHandleX * 100}%`,
+          top: `${overlay.directionHandleY * 100}%`,
+          width: '12px',
+          height: '12px',
+          transform: 'translate(-50%, -50%)',
+          boxShadow: activeTool === 'rotate' ? '0 0 0 4px rgba(103,232,249,0.18)' : 'none',
+        }}
+      />
+      <div
+        className="pointer-events-none absolute rounded-[3px] border border-cyan-100/90 bg-cyan-100/85"
+        style={{
+          left: `${overlay.shapeHandleX * 100}%`,
+          top: `${overlay.shapeHandleY * 100}%`,
+          width: '11px',
+          height: '11px',
+          transform: 'translate(-50%, -50%)',
+          boxShadow: activeTool === 'scale' ? '0 0 0 4px rgba(103,232,249,0.18)' : 'none',
+        }}
+      />
+      <div
         className="pointer-events-none absolute h-[2px] origin-left bg-cyan-200/85"
         style={{
           left,
           top,
           width: '56px',
-          transform: `translateY(-50%) rotate(${resolveEmitterDirectionDeg(emitter)}deg)`,
+          transform: `translateY(-50%) rotate(${overlay.directionDeg}deg)`,
         }}
       />
     </>
   )
 }
 
+function SpriteViewportOverlay({
+  activeTool,
+  layout,
+  previewSize,
+}: {
+  activeTool: ComposerViewportTool
+  layout: { x: number; y: number; width: number; height: number }
+  previewSize: { width: number; height: number }
+}) {
+  return (
+    <>
+      <div
+        className="pointer-events-none absolute border border-cyan-200/85"
+        style={{
+          left: `${(layout.x / Math.max(previewSize.width, 1)) * 100}%`,
+          top: `${(layout.y / Math.max(previewSize.height, 1)) * 100}%`,
+          width: `${(layout.width / Math.max(previewSize.width, 1)) * 100}%`,
+          height: `${(layout.height / Math.max(previewSize.height, 1)) * 100}%`,
+        }}
+      />
+      <div
+        className="pointer-events-none absolute rounded-[3px] border border-cyan-100/90 bg-cyan-100/85"
+        style={{
+          left: `${((layout.x + layout.width) / Math.max(previewSize.width, 1)) * 100}%`,
+          top: `${((layout.y + layout.height) / Math.max(previewSize.height, 1)) * 100}%`,
+          width: '11px',
+          height: '11px',
+          transform: 'translate(-50%, -50%)',
+          boxShadow: activeTool === 'scale' ? '0 0 0 4px rgba(103,232,249,0.18)' : 'none',
+        }}
+      />
+      <div
+        className="pointer-events-none absolute rounded-full border border-cyan-100/90 bg-cyan-100"
+        style={{
+          left: `${((layout.x + (layout.width / 2)) / Math.max(previewSize.width, 1)) * 100}%`,
+          top: `${((layout.y - 20) / Math.max(previewSize.height, 1)) * 100}%`,
+          width: '12px',
+          height: '12px',
+          transform: 'translate(-50%, -50%)',
+          boxShadow: activeTool === 'rotate' ? '0 0 0 4px rgba(103,232,249,0.18)' : 'none',
+        }}
+      />
+    </>
+  )
+}
+
+function ParticleAreaViewportOverlay({
+  activeTool,
+  overlay,
+}: {
+  activeTool: ComposerViewportTool
+  overlay: ReturnType<typeof resolveParticleAreaOverlay>
+}) {
+  if (!overlay) {
+    return null
+  }
+  if (overlay.kind === 'rect') {
+    return (
+      <>
+        <div
+          className="pointer-events-none absolute border border-cyan-200/85 bg-cyan-200/10"
+          style={{
+            left: `${overlay.leftPercent}%`,
+            top: `${overlay.topPercent}%`,
+            width: `${overlay.widthPercent}%`,
+            height: `${overlay.heightPercent}%`,
+          }}
+        />
+        <div
+          className="pointer-events-none absolute rounded-[3px] border border-cyan-100/90 bg-cyan-100/85"
+          style={{
+            left: `${overlay.handleLeftPercent}%`,
+            top: `${overlay.handleTopPercent}%`,
+            width: '11px',
+            height: '11px',
+            transform: 'translate(-50%, -50%)',
+            boxShadow: activeTool === 'scale' ? '0 0 0 4px rgba(103,232,249,0.18)' : 'none',
+          }}
+        />
+      </>
+    )
+  }
+  return (
+    <>
+      {overlay.points.map((point, index) => (
+        <div
+          key={`${index}-${point.leftPercent}-${point.topPercent}`}
+          className="pointer-events-none absolute rounded-full border border-cyan-100/90 bg-cyan-100"
+          style={{
+            left: `${point.leftPercent}%`,
+            top: `${point.topPercent}%`,
+            width: '12px',
+            height: '12px',
+            transform: 'translate(-50%, -50%)',
+            boxShadow: activeTool === 'polygon' ? '0 0 0 4px rgba(103,232,249,0.18)' : 'none',
+          }}
+        />
+      ))}
+    </>
+  )
+}
+
 function ComposerNodeInspector({
   availableImageKeys,
+  viewportTool,
   node,
   onOpenParticleEditor,
+  onActivateViewportTool,
   onChange,
 }: {
   availableImageKeys: Array<{ key: string; label: string }>
+  viewportTool: ComposerViewportTool
   node: SceneNode
   onOpenParticleEditor: (nodeId: string) => void
+  onActivateViewportTool: (nodeId: string, tool: ComposerViewportTool) => void
   onChange: (node: SceneNode) => void
 }) {
   return (
@@ -3205,20 +4426,143 @@ function ComposerNodeInspector({
           />
         </label>
       </div>
-      {node.kind === 'sprite' ? <ComposerSpriteInspector availableImageKeys={availableImageKeys} node={node} onChange={onChange} /> : null}
+      {node.kind === 'sprite' ? (
+        <ComposerSpriteInspector
+          availableImageKeys={availableImageKeys}
+          viewportTool={viewportTool}
+          node={node}
+          onActivateViewportTool={onActivateViewportTool}
+          onChange={onChange}
+        />
+      ) : null}
       {node.kind === 'effect' ? <ComposerEffectInspector node={node} onChange={onChange} /> : null}
       {node.kind === 'emitter' ? <ComposerEmitterInspector availableImageKeys={availableImageKeys} node={node} onChange={onChange} onOpenParticleEditor={onOpenParticleEditor} /> : null}
+      {node.kind === 'particle_area' ? <ComposerParticleAreaInspector viewportTool={viewportTool} node={node} onActivateViewportTool={onActivateViewportTool} onChange={onChange} /> : null}
+    </div>
+  )
+}
+
+function ComposerParticleAreaInspector({
+  viewportTool,
+  node,
+  onActivateViewportTool,
+  onChange,
+}: {
+  viewportTool: ComposerViewportTool
+  node: SceneParticleAreaNode
+  onActivateViewportTool: (nodeId: string, tool: ComposerViewportTool) => void
+  onChange: (node: SceneNode) => void
+}) {
+  return (
+    <div className="space-y-4">
+      <ComposerSection title="Region" defaultOpen>
+        <div className="space-y-4">
+          <div className="grid grid-cols-2 gap-2">
+            {(['rect', 'polygon'] as const).map((shape) => (
+              <button
+                key={shape}
+                className={['secondary-button justify-center capitalize', (node.shape ?? 'rect') === shape ? 'border-cyan-300/40 text-cyan-100' : ''].join(' ')}
+                onClick={() => onChange({
+                  ...node,
+                  shape,
+                  points: shape === 'polygon'
+                    ? (node.points && node.points.length >= 3 ? node.points : [
+                      { x: 0.25, y: 0.25 },
+                      { x: 0.75, y: 0.25 },
+                      { x: 0.5, y: 0.55 },
+                    ])
+                    : node.points,
+                })}
+                type="button"
+              >
+                {shape}
+              </button>
+            ))}
+          </div>
+          {(node.shape ?? 'rect') === 'rect' ? (
+            <div className="grid gap-3 sm:grid-cols-2">
+              <RangeField label="X" max={100} min={0} step={1} value={node.region.x * 100} onChange={(value) => onChange({ ...node, region: { ...node.region, x: value / 100 } })} />
+              <RangeField label="Y" max={100} min={0} step={1} value={node.region.y * 100} onChange={(value) => onChange({ ...node, region: { ...node.region, y: value / 100 } })} />
+              <RangeField label="Width" max={100} min={1} step={1} value={node.region.width * 100} onChange={(value) => onChange({ ...node, region: { ...node.region, width: value / 100 } })} />
+              <RangeField label="Height" max={100} min={1} step={1} value={node.region.height * 100} onChange={(value) => onChange({ ...node, region: { ...node.region, height: value / 100 } })} />
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <div className="surface-muted p-3 text-sm text-slate-300">
+                Click in the viewport to add polygon vertices. The area closes automatically from the last point back to the first.
+              </div>
+              <div className="grid gap-2">
+                {(node.points ?? []).map((point, index) => (
+                  <div key={`${index}-${point.x}-${point.y}`} className="surface-muted flex items-center justify-between gap-3 px-3 py-2 text-sm text-slate-300">
+                    <span>Point {index + 1}: {(point.x * 100).toFixed(0)}%, {(point.y * 100).toFixed(0)}%</span>
+                    <button
+                      className="icon-button"
+                      onClick={() => onChange({ ...node, points: (node.points ?? []).filter((_, pointIndex) => pointIndex !== index) })}
+                      type="button"
+                    >
+                      <FiTrash2 className="size-4" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+              <button
+                className="secondary-button w-full justify-center"
+                onClick={() => onChange({ ...node, points: [] })}
+                type="button"
+              >
+                Clear polygon
+              </button>
+            </div>
+          )}
+          <button
+            className={[
+              'secondary-button w-full justify-center',
+              viewportTool === ((node.shape ?? 'rect') === 'polygon' ? 'polygon' : 'region') ? 'border-cyan-300/40 text-cyan-100' : '',
+            ].join(' ')}
+            onClick={() => onActivateViewportTool(node.id, (node.shape ?? 'rect') === 'polygon' ? 'polygon' : 'region')}
+            type="button"
+          >
+            {(node.shape ?? 'rect') === 'polygon' ? 'Edit polygon points in viewport' : 'Draw area in viewport'}
+          </button>
+        </div>
+      </ComposerSection>
+      <ComposerSection title="Behavior" defaultOpen>
+        <div className="space-y-4">
+          <label className="flex items-center justify-between gap-3 text-sm text-slate-300">
+            <span>Occluder</span>
+            <input
+              checked={node.occluder}
+              className="size-4 accent-emerald-300"
+              onChange={(event) => onChange({ ...node, occluder: event.currentTarget.checked })}
+              type="checkbox"
+            />
+          </label>
+          <label className="flex items-center justify-between gap-3 text-sm text-slate-300">
+            <span>Landing surface</span>
+            <input
+              checked={node.surface}
+              className="size-4 accent-emerald-300"
+              onChange={(event) => onChange({ ...node, surface: event.currentTarget.checked })}
+              type="checkbox"
+            />
+          </label>
+        </div>
+      </ComposerSection>
     </div>
   )
 }
 
 function ComposerSpriteInspector({
   availableImageKeys,
+  viewportTool,
   node,
+  onActivateViewportTool,
   onChange,
 }: {
   availableImageKeys: Array<{ key: string; label: string }>
+  viewportTool: ComposerViewportTool
   node: SceneSpriteNode
+  onActivateViewportTool: (nodeId: string, tool: ComposerViewportTool) => void
   onChange: (node: SceneNode) => void
 }) {
   const isBaseSprite = node.image_key === 'base' || node.id === 'sprite-base'
@@ -3302,6 +4646,54 @@ function ComposerSpriteInspector({
           ))}
         </div>
       </ComposerSection>
+      <ComposerSection title="Particles">
+        <div className="space-y-4">
+          <label className="flex items-center justify-between gap-3 text-sm text-slate-300">
+            <span>Occlude particles</span>
+            <input
+              checked={Boolean(node.particle_occluder)}
+              className="size-4 accent-emerald-300"
+              onChange={(event) => onChange({ ...node, particle_occluder: event.currentTarget.checked })}
+              type="checkbox"
+            />
+          </label>
+          <label className="flex items-center justify-between gap-3 text-sm text-slate-300">
+            <span>Landing surface</span>
+            <input
+              checked={Boolean(node.particle_surface)}
+              className="size-4 accent-emerald-300"
+              onChange={(event) => onChange({ ...node, particle_surface: event.currentTarget.checked })}
+              type="checkbox"
+            />
+          </label>
+          <div className="surface-muted p-3 text-sm text-slate-300">
+            Mark foreground sprites as particle occluders to hide rain or sparks behind them. Mark ledges or ground sprites as landing surfaces so snow and dust can settle on their top edge.
+          </div>
+          {node.particle_occluder || node.particle_surface ? (
+            <div className="grid gap-2 sm:grid-cols-2">
+              <button
+                className={['secondary-button justify-center', viewportTool === 'region' ? 'border-cyan-300/40 text-cyan-100' : ''].join(' ')}
+                onClick={() => onActivateViewportTool(node.id, 'region')}
+                type="button"
+              >
+                Edit region in viewport
+              </button>
+              <button
+                className="secondary-button justify-center"
+                onClick={() => onChange({ ...node, particle_region: null })}
+                type="button"
+              >
+                Clear custom region
+              </button>
+            </div>
+          ) : null}
+          {node.particle_region ? (
+            <div className="surface-muted p-3 text-xs text-slate-300">
+              Region: x {(node.particle_region.x * 100).toFixed(0)}%, y {(node.particle_region.y * 100).toFixed(0)}%, w {(node.particle_region.width * 100).toFixed(0)}%, h {(node.particle_region.height * 100).toFixed(0)}%
+            </div>
+          ) : null}
+        </div>
+      </ComposerSection>
     </div>
   )
 }
@@ -3375,6 +4767,7 @@ function ComposerEmitterInspector({
   const maxSpeed = resolveEmitterMaxSpeed(node)
   const minLife = resolveEmitterMinLife(node)
   const maxLife = resolveEmitterMaxLife(node)
+  const particleRotationDeg = resolveEmitterParticleRotationDeg(node)
   const sizeCurve = resolveScalarCurve(node.size_curve, defaultEmitterSizeCurve(node.preset))
   const alphaCurve = resolveScalarCurve(node.alpha_curve, defaultEmitterAlphaCurve(node.preset))
   const colorCurve = resolveColorCurve(node.color_curve, defaultEmitterColorCurve(node.preset))
@@ -3402,6 +4795,7 @@ function ComposerEmitterInspector({
                 max_speed: defaultEmitterMaxSpeed(option.preset),
                 min_life: defaultEmitterMinLife(option.preset),
                 max_life: defaultEmitterMaxLife(option.preset),
+                particle_rotation_deg: 0,
                 size_curve: defaultEmitterSizeCurve(option.preset),
                 alpha_curve: defaultEmitterAlphaCurve(option.preset),
                 color_curve: defaultEmitterColorCurve(option.preset),
@@ -3482,6 +4876,14 @@ function ComposerEmitterInspector({
               onChange={(event) => onChange({ ...node, color_hex: event.currentTarget.value })}
             />
           </label>
+          <RangeField
+            label="Particle rotation"
+            max={180}
+            min={-180}
+            step={1}
+            value={particleRotationDeg}
+            onChange={(value) => onChange({ ...node, particle_rotation_deg: clampDegrees(value) })}
+          />
           <div>
             <div className="mb-2 text-xs uppercase tracking-[0.18em] text-slate-400">Particle image</div>
             <div className="grid gap-2">
@@ -3644,11 +5046,13 @@ function CurveSummaryCard({ label, points }: { label: string; points: number }) 
 
 function ParticleEditorModal({
   availableImageKeys,
+  documentVisible,
   node,
   onClose,
   onSave,
 }: {
   availableImageKeys: Array<{ key: string; label: string }>
+  documentVisible: boolean
   node: Extract<SceneNode, { kind: 'emitter' }>
   onClose: () => void
   onSave: (node: Extract<SceneNode, { kind: 'emitter' }>) => void
@@ -3695,7 +5099,10 @@ function ParticleEditorModal({
               <div className="mt-1 text-xs uppercase tracking-[0.16em] text-slate-400">{draft.preset} emitter</div>
             </div>
             <div className="min-h-0 flex-1 p-5">
-              <ParticlePreviewPanel availableImageKeys={availableImageKeys} node={previewNode} />
+              <ParticlePreviewPanel
+                documentVisible={documentVisible}
+                node={previewNode}
+              />
             </div>
           </div>
           <div className="min-h-0 overflow-y-auto p-5">
@@ -3742,10 +5149,10 @@ function ParticleEditorModal({
 }
 
 function ParticlePreviewPanel({
-  availableImageKeys,
+  documentVisible,
   node,
 }: {
-  availableImageKeys: Array<{ key: string; label: string }>
+  documentVisible: boolean
   node: Extract<SceneNode, { kind: 'emitter' }>
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
@@ -3760,12 +5167,25 @@ function ParticlePreviewPanel({
     }
     let frame = 0
     let disposed = false
+    const frameIntervalMs = 1000 / 24
+    let lastRenderedAt = 0
     const render = (now: number) => {
       if (disposed) {
         return
       }
-      canvas.width = 960
-      canvas.height = 540
+      if (!documentVisible) {
+        frame = window.requestAnimationFrame(render)
+        return
+      }
+      if (now - lastRenderedAt < frameIntervalMs) {
+        frame = window.requestAnimationFrame(render)
+        return
+      }
+      lastRenderedAt = now
+      if (canvas.width !== 960 || canvas.height !== 540) {
+        canvas.width = 960
+        canvas.height = 540
+      }
       context.clearRect(0, 0, canvas.width, canvas.height)
       const gradient = context.createLinearGradient(0, 0, canvas.width, canvas.height)
       gradient.addColorStop(0, '#040810')
@@ -3773,7 +5193,7 @@ function ParticlePreviewPanel({
       context.fillStyle = gradient
       context.fillRect(0, 0, canvas.width, canvas.height)
       drawPreviewGrid(context, canvas.width, canvas.height)
-      drawComposerEmitterNode(context, new Map<string, HTMLImageElement>(), node, now / 1000)
+      drawComposerEmitterNode(context, new Map<string, HTMLImageElement>(), node, [], now / 1000)
       frame = window.requestAnimationFrame(render)
     }
     frame = window.requestAnimationFrame(render)
@@ -3781,7 +5201,7 @@ function ParticlePreviewPanel({
       disposed = true
       window.cancelAnimationFrame(frame)
     }
-  }, [availableImageKeys, node])
+  }, [documentVisible, node])
 
   return (
     <div className="flex h-full flex-col gap-3">
@@ -3968,6 +5388,8 @@ function drawComposerSceneFrame(
   context: CanvasRenderingContext2D,
   images: Map<string, HTMLImageElement>,
   nodes: SceneNode[],
+  selectedNode: SceneNode | null,
+  draftParticleRegion: SceneNormalizedRect | null,
   timeSeconds: number,
 ) {
   const width = context.canvas.width
@@ -3975,6 +5397,7 @@ function drawComposerSceneFrame(
   context.clearRect(0, 0, width, height)
   context.fillStyle = '#05070a'
   context.fillRect(0, 0, width, height)
+  const particleBlockers = buildComposerParticleBlockers(images, nodes, width, height, timeSeconds)
 
   for (const node of nodes) {
     if (!node.enabled) {
@@ -3988,17 +5411,52 @@ function drawComposerSceneFrame(
     } else if (node.kind === 'effect') {
       drawComposerEffectNode(context, node, timeSeconds)
     } else if (node.kind === 'emitter') {
-      drawComposerEmitterNode(context, images, node, timeSeconds)
+      drawComposerEmitterNode(context, images, node, particleBlockers, timeSeconds)
+    }
+  }
+
+  if (selectedNode?.kind === 'sprite') {
+    const image = images.get(selectedNode.image_key)
+    if (image) {
+      const layout = resolveComposerSpriteLayout(context, image, selectedNode, timeSeconds)
+      const region = resolveSpriteParticleRegionRect(
+        layout,
+        draftParticleRegion ?? selectedNode.particle_region ?? null,
+      )
+      if (region) {
+        drawParticleRegionOverlay(context, region)
+      }
+    }
+  }
+  if (selectedNode?.kind === 'particle_area') {
+    if ((selectedNode.shape ?? 'rect') === 'polygon') {
+      drawParticlePolygonOverlay(
+        context,
+        (selectedNode.points ?? []).map((point) => ({
+          x: context.canvas.width * point.x,
+          y: context.canvas.height * point.y,
+        })),
+      )
+    } else {
+      drawParticleRegionOverlay(context, {
+        x: context.canvas.width * (draftParticleRegion?.x ?? selectedNode.region.x),
+        y: context.canvas.height * (draftParticleRegion?.y ?? selectedNode.region.y),
+        width: context.canvas.width * (draftParticleRegion?.width ?? selectedNode.region.width),
+        height: context.canvas.height * (draftParticleRegion?.height ?? selectedNode.region.height),
+      })
     }
   }
 }
 
-function drawComposerSpriteNode(
-  context: CanvasRenderingContext2D,
+function resolveComposerSpriteLayoutFromBounds(
+  canvasWidth: number,
+  canvasHeight: number,
   image: HTMLImageElement,
   node: SceneSpriteNode,
   timeSeconds: number,
 ) {
+  const canvasAspect = canvasWidth / Math.max(canvasHeight, 1)
+  const sourceAspect = image.naturalWidth / Math.max(image.naturalHeight, 1)
   let offsetX = node.x
   let offsetY = node.y
   let opacity = node.opacity
@@ -4021,40 +5479,156 @@ function drawComposerSpriteNode(
   }
 
   const fit = node.fit ?? 'cover'
-  const sourceAspect = image.naturalWidth / image.naturalHeight
-  const canvasAspect = context.canvas.width / context.canvas.height
-  let drawWidth = image.naturalWidth * scale
-  let drawHeight = image.naturalHeight * scale
+  let drawWidth = image.naturalWidth
+  let drawHeight = image.naturalHeight
 
   if (fit === 'cover') {
     if (sourceAspect > canvasAspect) {
-      drawHeight = context.canvas.height
+      drawHeight = canvasHeight
       drawWidth = drawHeight * sourceAspect
     } else {
-      drawWidth = context.canvas.width
+      drawWidth = canvasWidth
       drawHeight = drawWidth / sourceAspect
     }
   } else if (fit === 'contain') {
     if (sourceAspect > canvasAspect) {
-      drawWidth = context.canvas.width
+      drawWidth = canvasWidth
       drawHeight = drawWidth / sourceAspect
     } else {
-      drawHeight = context.canvas.height
+      drawHeight = canvasHeight
       drawWidth = drawHeight * sourceAspect
     }
   } else if (fit === 'stretch') {
-    drawWidth = context.canvas.width
-    drawHeight = context.canvas.height
+    drawWidth = canvasWidth
+    drawHeight = canvasHeight
   }
 
-  const x = (context.canvas.width - drawWidth) / 2 + offsetX
-  const y = (context.canvas.height - drawHeight) / 2 + offsetY
+  if (fit !== 'center') {
+    drawWidth *= scale
+    drawHeight *= scale
+  }
+
+  return {
+    x: ((canvasWidth - drawWidth) / 2) + offsetX,
+    y: ((canvasHeight - drawHeight) / 2) + offsetY,
+    width: drawWidth,
+    height: drawHeight,
+    opacity,
+  }
+}
+
+function resolveComposerSpriteLayout(
+  context: CanvasRenderingContext2D,
+  image: HTMLImageElement,
+  node: SceneSpriteNode,
+  timeSeconds: number,
+) {
+  return resolveComposerSpriteLayoutFromBounds(context.canvas.width, context.canvas.height, image, node, timeSeconds)
+}
+
+function normalizeDraggedRect(startX: number, startY: number, endX: number, endY: number): SceneNormalizedRect {
+  const x = Math.min(startX, endX)
+  const y = Math.min(startY, endY)
+  const width = Math.max(0.001, Math.abs(endX - startX))
+  const height = Math.max(0.001, Math.abs(endY - startY))
+  return {
+    x: clamp01(x),
+    y: clamp01(y),
+    width: Math.min(width, 1 - clamp01(x)),
+    height: Math.min(height, 1 - clamp01(y)),
+  }
+}
+
+function polygonBounds(points: SceneNormalizedPoint[]): SceneNormalizedRect | null {
+  if (points.length === 0) {
+    return null
+  }
+  const xs = points.map((point) => point.x)
+  const ys = points.map((point) => point.y)
+  const minX = Math.min(...xs)
+  const maxX = Math.max(...xs)
+  const minY = Math.min(...ys)
+  const maxY = Math.max(...ys)
+  return {
+    x: minX,
+    y: minY,
+    width: Math.max(0.001, maxX - minX),
+    height: Math.max(0.001, maxY - minY),
+  }
+}
+
+function resolveSpriteParticleRegionRect(
+  layout: { x: number; y: number; width: number; height: number },
+  region: SceneNormalizedRect | null,
+) {
+  if (!region) {
+    return layout
+  }
+  return {
+    x: layout.x + (layout.width * region.x),
+    y: layout.y + (layout.height * region.y),
+    width: layout.width * region.width,
+    height: layout.height * region.height,
+  }
+}
+
+function drawParticleRegionOverlay(
+  context: CanvasRenderingContext2D,
+  region: { x: number; y: number; width: number; height: number },
+) {
+  context.save()
+  context.strokeStyle = 'rgba(103, 232, 249, 0.95)'
+  context.fillStyle = 'rgba(103, 232, 249, 0.12)'
+  context.lineWidth = 2
+  context.setLineDash([8, 6])
+  context.fillRect(region.x, region.y, region.width, region.height)
+  context.strokeRect(region.x, region.y, region.width, region.height)
+  context.restore()
+}
+
+function drawParticlePolygonOverlay(
+  context: CanvasRenderingContext2D,
+  points: Array<{ x: number; y: number }>,
+) {
+  if (points.length === 0) {
+    return
+  }
+  context.save()
+  context.strokeStyle = 'rgba(103, 232, 249, 0.95)'
+  context.fillStyle = 'rgba(103, 232, 249, 0.12)'
+  context.lineWidth = 2
+  context.setLineDash([8, 6])
+  context.beginPath()
+  context.moveTo(points[0].x, points[0].y)
+  for (const point of points.slice(1)) {
+    context.lineTo(point.x, point.y)
+  }
+  context.closePath()
+  context.fill()
+  context.stroke()
+  context.setLineDash([])
+  for (const point of points) {
+    context.beginPath()
+    context.arc(point.x, point.y, 4, 0, Math.PI * 2)
+    context.fillStyle = 'rgba(103, 232, 249, 0.95)'
+    context.fill()
+  }
+  context.restore()
+}
+
+function drawComposerSpriteNode(
+  context: CanvasRenderingContext2D,
+  image: HTMLImageElement,
+  node: SceneSpriteNode,
+  timeSeconds: number,
+) {
+  const layout = resolveComposerSpriteLayout(context, image, node, timeSeconds)
 
   context.save()
-  context.globalAlpha = opacity
-  context.translate(x + drawWidth / 2, y + drawHeight / 2)
+  context.globalAlpha = layout.opacity
+  context.translate(layout.x + layout.width / 2, layout.y + layout.height / 2)
   context.rotate((node.rotation_deg * Math.PI) / 180)
-  context.drawImage(image, -drawWidth / 2, -drawHeight / 2, drawWidth, drawHeight)
+  context.drawImage(image, -layout.width / 2, -layout.height / 2, layout.width, layout.height)
   context.restore()
 }
 
@@ -4139,9 +5713,10 @@ function drawComposerEmitterNode(
   context: CanvasRenderingContext2D,
   images: Map<string, HTMLImageElement>,
   node: Extract<SceneNode, { kind: 'emitter' }>,
+  particleBlockers: ComposerParticleBlocker[],
   timeSeconds: number,
 ) {
-  const particles = buildComposerEmitterParticles(node, context.canvas.width, context.canvas.height, timeSeconds)
+  const particles = buildComposerEmitterParticles(node, context.canvas.width, context.canvas.height, particleBlockers, timeSeconds)
   const particleImageKey = resolveEmitterParticleImageKey(node)
   const particleImage = particleImageKey ? images.get(particleImageKey) ?? null : null
   context.save()
@@ -4174,6 +5749,7 @@ function buildComposerEmitterParticles(
   node: Extract<SceneNode, { kind: 'emitter' }>,
   width: number,
   height: number,
+  particleBlockers: ComposerParticleBlocker[],
   timeSeconds: number,
 ) {
   const averageLife = (resolveEmitterMinLife(node) + resolveEmitterMaxLife(node)) / 2
@@ -4213,24 +5789,59 @@ function buildComposerEmitterParticles(
     const vx = speed * Math.cos(angle) * dragScale
     const vy = speed * Math.sin(angle) * dragScale
     const x = spawnPosition.x + vx * age + (0.5 * node.gravity_x * age * age)
-    const y = spawnPosition.y + vy * age + (0.5 * node.gravity_y * age * age)
+    let y = spawnPosition.y + vy * age + (0.5 * node.gravity_y * age * age)
     const progress = Math.min(1, age / maxLife)
     const sizeScale = evaluateScalarCurve(sizeCurve, progress)
     const alpha = Math.max(0, alphaBase * evaluateScalarCurve(alphaCurve, progress))
     if (alpha <= 0) {
       continue
     }
+    const radius = Math.max(1, size * sizeScale)
+    const collision = resolveComposerParticleCollision(node, particleBlockers, x, y, radius)
+    if (collision === 'discard') {
+      continue
+    }
+    if (typeof collision === 'number') {
+      y = collision
+    }
     const color = evaluateColorCurve(colorCurve, progress, resolveEmitterColorHex(node))
     const particleShape = node.preset === 'rain' && !textured ? 'streak' : textured ? 'texture' : 'circle'
+    const renderAngle = resolveRenderedParticleAngleRad(node, vx, vy)
+    const sizeX = node.preset === 'rain'
+      ? size * sizeScale * 1.2
+      : node.preset === 'snow'
+        ? size * sizeScale * 2.0
+        : node.preset === 'dust'
+          ? size * sizeScale * 2.2
+          : size * sizeScale * 2.0
+    const sizeY = node.preset === 'rain'
+      ? size * sizeScale * 8.5
+      : node.preset === 'snow'
+        ? size * sizeScale * 2.0
+        : node.preset === 'dust'
+          ? size * sizeScale * 2.2
+          : size * sizeScale * 2.0
+    const occluded = node.preset === 'rain'
+      ? isComposerParticleSegmentOccluded(
+        particleBlockers,
+        { x: x - (Math.cos(renderAngle + (Math.PI / 2)) * sizeY * 0.5), y: y - (Math.sin(renderAngle + (Math.PI / 2)) * sizeY * 0.5) },
+        { x: x + (Math.cos(renderAngle + (Math.PI / 2)) * sizeY * 0.5), y: y + (Math.sin(renderAngle + (Math.PI / 2)) * sizeY * 0.5) },
+        Math.max(sizeX, 1.5) * 0.5,
+      )
+      : isComposerParticleOccluded(particleBlockers, x, y, Math.max(sizeX, sizeY) * 0.5)
+
+    if (occluded) {
+      continue
+    }
 
     if (node.preset === 'rain') {
       particles.push({
         x,
         y,
         radius: 0,
-        sizeX: size * sizeScale * 1.2,
-        sizeY: size * sizeScale * 8.5,
-        angle: Math.atan2(vy, vx),
+        sizeX,
+        sizeY,
+        angle: renderAngle,
         alpha: alpha * 0.92,
         color,
         shape: particleShape,
@@ -4239,10 +5850,10 @@ function buildComposerEmitterParticles(
       particles.push({
         x,
         y,
-        radius: size * sizeScale,
-        sizeX: size * sizeScale * 2.0,
-        sizeY: size * sizeScale * 2.0,
-        angle: 0,
+        radius,
+        sizeX,
+        sizeY,
+        angle: renderAngle,
         alpha: alpha * 0.86,
         color,
         shape: particleShape,
@@ -4251,10 +5862,10 @@ function buildComposerEmitterParticles(
       particles.push({
         x,
         y,
-        radius: size * sizeScale,
-        sizeX: size * sizeScale * 2.2,
-        sizeY: size * sizeScale * 2.2,
-        angle: 0,
+        radius,
+        sizeX,
+        sizeY,
+        angle: renderAngle,
         alpha: alpha * 0.7,
         color,
         shape: particleShape,
@@ -4263,10 +5874,10 @@ function buildComposerEmitterParticles(
       particles.push({
         x,
         y,
-        radius: size * sizeScale,
-        sizeX: size * sizeScale * 2.0,
-        sizeY: size * sizeScale * 2.0,
-        angle: 0,
+        radius,
+        sizeX,
+        sizeY,
+        angle: renderAngle,
         alpha,
         color,
         shape: particleShape,
@@ -4275,6 +5886,303 @@ function buildComposerEmitterParticles(
   }
 
   return particles
+}
+
+type ComposerParticleBlocker = {
+  x: number
+  y: number
+  width: number
+  height: number
+  polygon: Array<{ x: number; y: number }>
+  occluder: boolean
+  surface: boolean
+}
+
+function buildComposerParticleBlockers(
+  images: Map<string, HTMLImageElement>,
+  nodes: SceneNode[],
+  width: number,
+  height: number,
+  timeSeconds: number,
+): ComposerParticleBlocker[] {
+  const canvas = document.createElement('canvas')
+  canvas.width = Math.max(1, width)
+  canvas.height = Math.max(1, height)
+  const context = canvas.getContext('2d')
+  if (!context) {
+    return []
+  }
+
+  const blockers: ComposerParticleBlocker[] = []
+  for (const node of nodes) {
+    if (node.kind !== 'sprite' || !node.enabled) {
+      continue
+    }
+    if (!node.particle_occluder && !node.particle_surface) {
+      continue
+    }
+    const image = images.get(node.image_key)
+    if (!image) {
+      continue
+    }
+    const layout = resolveComposerSpriteLayout(context, image, node, timeSeconds)
+    const region = resolveSpriteParticleRegionRect(layout, node.particle_region ?? null)
+    blockers.push({
+      x: region.x,
+      y: region.y,
+      width: region.width,
+      height: region.height,
+      polygon: [],
+      occluder: Boolean(node.particle_occluder),
+      surface: Boolean(node.particle_surface),
+    })
+  }
+  for (const node of nodes) {
+    if (node.kind !== 'particle_area' || !node.enabled) {
+      continue
+    }
+    blockers.push({
+      x: width * node.region.x,
+      y: height * node.region.y,
+      width: width * node.region.width,
+      height: height * node.region.height,
+      polygon: (node.shape ?? 'rect') === 'polygon'
+        ? (node.points ?? []).map((point) => ({ x: width * point.x, y: height * point.y }))
+        : [],
+      occluder: node.occluder,
+      surface: node.surface,
+    })
+  }
+  return blockers
+}
+
+function isComposerParticleOccluded(
+  blockers: ComposerParticleBlocker[],
+  x: number,
+  y: number,
+  radius: number,
+) {
+  return blockers.some((blocker) => blocker.occluder
+    && composerBlockerContains(blocker, x, y, radius))
+}
+
+function isComposerParticleSegmentOccluded(
+  blockers: ComposerParticleBlocker[],
+  start: { x: number; y: number },
+  end: { x: number; y: number },
+  thicknessRadius: number,
+) {
+  return blockers.some((blocker) => blocker.occluder
+    && composerBlockerContainsSegment(blocker, start, end, thicknessRadius))
+}
+
+function resolveComposerParticleCollision(
+  node: Extract<SceneNode, { kind: 'emitter' }>,
+  blockers: ComposerParticleBlocker[],
+  x: number,
+  y: number,
+  radius: number,
+) {
+  const surface = blockers
+    .map((blocker) => ({ blocker, surfaceY: composerBlockerSurfaceY(blocker, x) }))
+    .filter((entry): entry is { blocker: ComposerParticleBlocker; surfaceY: number } => entry.blocker.surface && entry.surfaceY !== null && y >= entry.surfaceY && y <= entry.blocker.y + entry.blocker.height)
+    .sort((left, right) => left.surfaceY - right.surfaceY)[0]
+  if (!surface) {
+    return null
+  }
+  if (node.preset === 'snow' || node.preset === 'dust') {
+    return surface.surfaceY - radius
+  }
+  return 'discard'
+}
+
+function composerBlockerContains(blocker: ComposerParticleBlocker, x: number, y: number, radius: number) {
+  if (blocker.polygon.length >= 3) {
+    return polygonIntersectsCircle(blocker.polygon, x, y, radius)
+  }
+  return x >= blocker.x
+    && x <= blocker.x + blocker.width
+    && y + radius >= blocker.y
+    && y - radius <= blocker.y + blocker.height
+}
+
+function composerBlockerContainsSegment(
+  blocker: ComposerParticleBlocker,
+  start: { x: number; y: number },
+  end: { x: number; y: number },
+  thicknessRadius: number,
+) {
+  if (blocker.polygon.length >= 3) {
+    return polygonIntersectsSegment(blocker.polygon, start, end, thicknessRadius)
+  }
+  const left = blocker.x - thicknessRadius
+  const right = blocker.x + blocker.width + thicknessRadius
+  const top = blocker.y - thicknessRadius
+  const bottom = blocker.y + blocker.height + thicknessRadius
+  return pointInRect(start.x, start.y, { x: left, y: top, width: right - left, height: bottom - top })
+    || pointInRect(end.x, end.y, { x: left, y: top, width: right - left, height: bottom - top })
+    || segmentsIntersect(start, end, { x: left, y: top }, { x: right, y: top })
+    || segmentsIntersect(start, end, { x: right, y: top }, { x: right, y: bottom })
+    || segmentsIntersect(start, end, { x: right, y: bottom }, { x: left, y: bottom })
+    || segmentsIntersect(start, end, { x: left, y: bottom }, { x: left, y: top })
+}
+
+function composerBlockerSurfaceY(blocker: ComposerParticleBlocker, x: number) {
+  if (blocker.polygon.length >= 3) {
+    return polygonSurfaceY(blocker.polygon, x)
+  }
+  return x >= blocker.x && x <= blocker.x + blocker.width ? blocker.y : null
+}
+
+function pointInPolygon(points: Array<{ x: number; y: number }>, x: number, y: number) {
+  let inside = false
+  let previous = points.length - 1
+  for (let current = 0; current < points.length; current += 1) {
+    const a = points[current]
+    const b = points[previous]
+    const intersects = ((a.y > y) !== (b.y > y))
+      && (x < (((b.x - a.x) * (y - a.y)) / Math.max(Math.abs(b.y - a.y), Number.EPSILON)) + a.x)
+    if (intersects) {
+      inside = !inside
+    }
+    previous = current
+  }
+  return inside
+}
+
+function polygonIntersectsCircle(
+  points: Array<{ x: number; y: number }>,
+  x: number,
+  y: number,
+  radius: number,
+) {
+  if (pointInPolygon(points, x, y)) {
+    return true
+  }
+  const radiusSq = radius * radius
+  for (let index = 0; index < points.length; index += 1) {
+    const a = points[index]
+    const b = points[(index + 1) % points.length]
+    if (distanceSqToSegment({ x, y }, a, b) <= radiusSq) {
+      return true
+    }
+  }
+  return false
+}
+
+function polygonIntersectsSegment(
+  points: Array<{ x: number; y: number }>,
+  start: { x: number; y: number },
+  end: { x: number; y: number },
+  thicknessRadius: number,
+) {
+  if (pointInPolygon(points, start.x, start.y) || pointInPolygon(points, end.x, end.y)) {
+    return true
+  }
+  const thicknessSq = thicknessRadius * thicknessRadius
+  for (let index = 0; index < points.length; index += 1) {
+    const a = points[index]
+    const b = points[(index + 1) % points.length]
+    if (segmentsIntersect(start, end, a, b)) {
+      return true
+    }
+    if (distanceSqBetweenSegments(start, end, a, b) <= thicknessSq) {
+      return true
+    }
+  }
+  return false
+}
+
+function orientation2d(a: { x: number; y: number }, b: { x: number; y: number }, c: { x: number; y: number }) {
+  return ((b.y - a.y) * (c.x - b.x)) - ((b.x - a.x) * (c.y - b.y))
+}
+
+function onSegment2d(a: { x: number; y: number }, b: { x: number; y: number }, c: { x: number; y: number }) {
+  return b.x >= Math.min(a.x, c.x)
+    && b.x <= Math.max(a.x, c.x)
+    && b.y >= Math.min(a.y, c.y)
+    && b.y <= Math.max(a.y, c.y)
+}
+
+function segmentsIntersect(
+  p1: { x: number; y: number },
+  q1: { x: number; y: number },
+  p2: { x: number; y: number },
+  q2: { x: number; y: number },
+) {
+  const o1 = orientation2d(p1, q1, p2)
+  const o2 = orientation2d(p1, q1, q2)
+  const o3 = orientation2d(p2, q2, p1)
+  const o4 = orientation2d(p2, q2, q1)
+
+  if (((o1 > 0 && o2 < 0) || (o1 < 0 && o2 > 0))
+    && ((o3 > 0 && o4 < 0) || (o3 < 0 && o4 > 0))) {
+    return true
+  }
+  if (Math.abs(o1) <= Number.EPSILON && onSegment2d(p1, p2, q1)) return true
+  if (Math.abs(o2) <= Number.EPSILON && onSegment2d(p1, q2, q1)) return true
+  if (Math.abs(o3) <= Number.EPSILON && onSegment2d(p2, p1, q2)) return true
+  if (Math.abs(o4) <= Number.EPSILON && onSegment2d(p2, q1, q2)) return true
+  return false
+}
+
+function distanceSqBetweenSegments(
+  a1: { x: number; y: number },
+  a2: { x: number; y: number },
+  b1: { x: number; y: number },
+  b2: { x: number; y: number },
+) {
+  const d1 = distanceSqToSegment(a1, b1, b2)
+  const d2 = distanceSqToSegment(a2, b1, b2)
+  const d3 = distanceSqToSegment(b1, a1, a2)
+  const d4 = distanceSqToSegment(b2, a1, a2)
+  return Math.min(d1, d2, d3, d4)
+}
+
+function distanceSqToSegment(
+  point: { x: number; y: number },
+  a: { x: number; y: number },
+  b: { x: number; y: number },
+) {
+  const abX = b.x - a.x
+  const abY = b.y - a.y
+  const apX = point.x - a.x
+  const apY = point.y - a.y
+  const abLenSq = (abX * abX) + (abY * abY)
+  if (abLenSq <= Number.EPSILON) {
+    const dx = point.x - a.x
+    const dy = point.y - a.y
+    return (dx * dx) + (dy * dy)
+  }
+  const t = Math.max(0, Math.min(1, ((apX * abX) + (apY * abY)) / abLenSq))
+  const closestX = a.x + (abX * t)
+  const closestY = a.y + (abY * t)
+  const dx = point.x - closestX
+  const dy = point.y - closestY
+  return (dx * dx) + (dy * dy)
+}
+
+function polygonSurfaceY(points: Array<{ x: number; y: number }>, x: number) {
+  const hits: number[] = []
+  for (let index = 0; index < points.length; index += 1) {
+    const a = points[index]
+    const b = points[(index + 1) % points.length]
+    const minX = Math.min(a.x, b.x)
+    const maxX = Math.max(a.x, b.x)
+    if (x < minX || x > maxX) {
+      continue
+    }
+    if (Math.abs(b.x - a.x) <= Number.EPSILON) {
+      hits.push(Math.min(a.y, b.y))
+      continue
+    }
+    const t = (x - a.x) / (b.x - a.x)
+    if (t < 0 || t > 1) {
+      continue
+    }
+    hits.push(a.y + ((b.y - a.y) * t))
+  }
+  return hits.length > 0 ? Math.min(...hits) : null
 }
 
 function sampleEmitterPosition(

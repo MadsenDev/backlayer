@@ -37,7 +37,7 @@ Backlayer should be structured as a wallpaper runtime made of five core areas:
 3. `Daemon controller`
    Runs continuously, owns monitor-to-wallpaper state, manages renderer processes, and applies runtime rules.
 4. `Hyprland integration`
-   Detects outputs and reacts to monitor changes using `hyprctl` first and, later, Hyprland socket events.
+   Detects outputs and reconciles monitor changes during daemon runtime using `hyprctl` first and, later, Hyprland socket events.
 5. `Configuration UI`
    A lightweight interface for selecting wallpapers, assigning them to monitors, and setting pause/fps behavior.
 
@@ -52,7 +52,7 @@ The product should behave like this:
 
 - A user configures wallpapers and rules in the UI
 - The daemon stores config and watches monitor state
-- The daemon reconciles monitor state during runtime so output changes do not require a full restart
+- The daemon reconciles monitor state during runtime on a coarse background cadence so output changes do not require a full restart
 - The daemon creates wallpaper surfaces for each active output
 - Renderer backends draw into those surfaces
 - The system pauses or throttles rendering based on power/performance rules
@@ -90,6 +90,7 @@ backlayer
 - Config file path target: `~/.config/backlayer/config.toml`
 - IPC direction: Unix domain socket with JSON messages between the UI and daemon
 - Wallpaper asset metadata direction: per-asset `backlayer.toml`
+- Native packaging direction: Backlayer-native wallpapers now move toward a single-file `.backlayer` package that keeps the same asset-relative manifest/resources shape as the current folder layout
 - Wayland bootstrap direction: `smithay-client-toolkit` layer-shell client that already proves background-surface creation on Hyprland
 - Output targeting direction: layer-shell surfaces can already be bound to a named monitor output before renderer work begins
 - Session direction: the Wayland layer now has a persistent background-surface session abstraction that can be pumped over time
@@ -101,7 +102,7 @@ backlayer
 - Shader runtime direction: shader sessions can now create a `wgpu` device, compile an external WGSL asset, bind a Wayland layer-shell surface, and submit a real shader frame
 - Image runtime direction: image sessions can now decode supported image assets, upload them to the GPU, bind a Wayland layer-shell surface, and submit a real textured frame
 - Native scene direction: the manager can now create Backlayer-native `scene` assets from existing image wallpapers by saving a native scene document with sprite, effect, and particle nodes into user-managed asset storage under `~/.config/backlayer/assets`
-- Native scene runtime direction: `scene-runner` now treats native Backlayer scenes as a real-time scene graph instead of a stack of pre-rendered overlay images, with GPU-native sprite/effect rendering plus a GPU-native particle pass, and native emitters now support positioned origins, explicit shapes, burst/range controls, over-life curves, direction control, and tint
+- Native scene runtime direction: `scene-runner` now treats native Backlayer scenes as a real-time scene graph instead of a stack of pre-rendered overlay images, with GPU-native sprite/effect rendering plus a GPU-native particle pass, and native emitters now support positioned origins, explicit shapes, burst/range controls, over-life curves, direction control, tint, plus scene-level and sprite-level particle occluders and landing surfaces with optional custom drawn regions and polygon particle areas
 
 ### Why this scope works
 

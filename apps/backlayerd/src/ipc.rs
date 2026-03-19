@@ -1,8 +1,14 @@
 use std::{
-    fs,
+    fs, io,
     io::{Read, Write},
     os::unix::net::{UnixListener, UnixStream},
     path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result};
@@ -12,9 +18,9 @@ use backlayer_renderer_image::ImageRenderer;
 use backlayer_renderer_shader::ShaderRenderer;
 use backlayer_renderer_video::VideoRenderer;
 use backlayer_types::{
-    AssetMetadata, AssignmentSettings, BacklayerConfig, CreateSceneAssetRequest, DaemonRequest,
-    DaemonResponse, DaemonState, EditableSceneAsset, MonitorAssignment, PausePolicy,
-    RuntimeDependencies,
+    AssetMetadata, AssignmentSettings, BacklayerConfig, CreateNativeAssetRequest,
+    CreateSceneAssetRequest, DaemonRequest, DaemonResponse, DaemonState, EditableSceneAsset,
+    MonitorAssignment, PausePolicy, RuntimeDependencies,
 };
 use backlayer_wayland::LayerShellRuntime;
 use tracing::{info, warn};
@@ -28,19 +34,13 @@ pub fn serve_forever(
     assets: Vec<AssetMetadata>,
 ) -> Result<()> {
     let listener = bind_listener(socket_path)?;
+    listener
+        .set_nonblocking(true)
+        .context("failed to configure nonblocking ipc listener")?;
     let mut server = IpcServer::new_persistent(config_path.to_path_buf(), state, assets);
     info!(path = %socket_path.display(), "daemon ipc server listening");
 
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
-                if let Err(error) = server.handle_client(stream) {
-                    warn!(%error, "ipc client handling failed");
-                }
-            }
-            Err(error) => warn!(%error, "ipc accept failed"),
-        }
-    }
+    serve_listener_until_stopped(&listener, &mut server, Arc::new(AtomicBool::new(false)))?;
 
     Ok(())
 }
@@ -75,10 +75,36 @@ fn bind_listener(socket_path: &Path) -> Result<UnixListener> {
         .with_context(|| format!("failed to bind socket {}", socket_path.display()))
 }
 
+fn serve_listener_until_stopped(
+    listener: &UnixListener,
+    server: &mut IpcServer,
+    shutdown: Arc<AtomicBool>,
+) -> Result<()> {
+    while !shutdown.load(Ordering::Relaxed) {
+        server.tick();
+
+        match listener.accept() {
+            Ok((stream, _)) => {
+                if let Err(error) = server.handle_client(stream) {
+                    warn!(%error, "ipc client handling failed");
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(100));
+            }
+            Err(error) => warn!(%error, "ipc accept failed"),
+        }
+    }
+
+    Ok(())
+}
+
 struct IpcServer {
     config_store: ConfigStore,
     hyprland: HyprlandClient,
     refresh_monitors_during_requests: bool,
+    monitor_refresh_interval: Duration,
+    last_monitor_refresh_at: Instant,
     config_path: PathBuf,
     state: DaemonState,
     assets: Vec<AssetMetadata>,
@@ -92,6 +118,8 @@ impl IpcServer {
             config_store: ConfigStore::default(),
             hyprland: HyprlandClient::new(),
             refresh_monitors_during_requests: false,
+            monitor_refresh_interval: Duration::from_secs(5),
+            last_monitor_refresh_at: Instant::now(),
             config_path,
             state,
             assets,
@@ -111,6 +139,10 @@ impl IpcServer {
             config_store: ConfigStore::default(),
             hyprland: HyprlandClient::new(),
             refresh_monitors_during_requests: true,
+            monitor_refresh_interval: Duration::from_secs(5),
+            last_monitor_refresh_at: Instant::now()
+                .checked_sub(Duration::from_secs(5))
+                .unwrap_or_else(Instant::now),
             config_path,
             state,
             assets,
@@ -147,7 +179,16 @@ impl IpcServer {
     }
 
     fn handle_request(&mut self, request: DaemonRequest) -> DaemonResponse {
-        self.refresh_monitors();
+        if matches!(
+            request,
+            DaemonRequest::AssignWallpaper { .. }
+                | DaemonRequest::UpdatePausePolicy { .. }
+                | DaemonRequest::UpdateAssignmentSettings { .. }
+                | DaemonRequest::RestartRendererSession { .. }
+                | DaemonRequest::SimulateRendererCrash { .. }
+        ) {
+            self.refresh_monitors_if_due();
+        }
 
         match request {
             DaemonRequest::GetState => {
@@ -188,6 +229,11 @@ impl IpcServer {
                 Ok(()) => DaemonResponse::Ack,
                 Err(message) => DaemonResponse::Error { message },
             },
+            DaemonRequest::CreateNativeAsset { request } => match self.create_native_asset(request)
+            {
+                Ok(asset) => DaemonResponse::Asset { asset },
+                Err(message) => DaemonResponse::Error { message },
+            },
             DaemonRequest::CreateSceneAsset { request } => match self.create_scene_asset(request) {
                 Ok(asset) => DaemonResponse::Asset { asset },
                 Err(message) => DaemonResponse::Error { message },
@@ -222,10 +268,18 @@ impl IpcServer {
         }
     }
 
-    fn refresh_monitors(&mut self) {
+    fn tick(&mut self) {
+        self.refresh_monitors_if_due();
+    }
+
+    fn refresh_monitors_if_due(&mut self) {
         if !self.refresh_monitors_during_requests {
             return;
         }
+        if self.last_monitor_refresh_at.elapsed() < self.monitor_refresh_interval {
+            return;
+        }
+        self.last_monitor_refresh_at = Instant::now();
 
         match self.hyprland.discover_monitors() {
             Ok(monitors) => {
@@ -312,6 +366,19 @@ impl IpcServer {
         let asset = self
             .config_store
             .create_native_scene_asset(&request, base_asset.as_ref())
+            .map_err(|error| error.to_string())?;
+
+        self.refresh_assets()?;
+        Ok(asset)
+    }
+
+    fn create_native_asset(
+        &mut self,
+        request: CreateNativeAssetRequest,
+    ) -> Result<AssetMetadata, String> {
+        let asset = self
+            .config_store
+            .create_native_file_asset(&request)
             .map_err(|error| error.to_string())?;
 
         self.refresh_assets()?;
@@ -501,6 +568,10 @@ mod tests {
         io::{Read, Write},
         net::Shutdown,
         os::unix::net::UnixStream,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
         thread,
         time::Duration,
     };
@@ -513,7 +584,7 @@ mod tests {
         RuntimeDependencies, RuntimePlan, WallpaperKind,
     };
 
-    use super::{IpcServer, serve_once};
+    use super::{IpcServer, bind_listener, serve_listener_until_stopped, serve_once};
 
     #[test]
     fn ipc_server_returns_state_response() {
@@ -625,11 +696,63 @@ mod tests {
     }
 
     #[test]
+    fn persistent_server_smoke_serves_runtime_state() {
+        let socket_path =
+            std::env::temp_dir().join(format!("backlayer-smoke-{}.sock", std::process::id()));
+        let config_path =
+            std::env::temp_dir().join(format!("backlayer-smoke-{}.toml", std::process::id()));
+        let listener = bind_listener(&socket_path).expect("listener should bind");
+        listener
+            .set_nonblocking(true)
+            .expect("listener should become nonblocking");
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let server_shutdown = shutdown.clone();
+
+        let handle = thread::spawn(move || {
+            let mut server =
+                IpcServer::new_persistent(config_path, sample_state(), vec![sample_asset()]);
+            serve_listener_until_stopped(&listener, &mut server, server_shutdown)
+                .expect("persistent server should run");
+        });
+
+        thread::sleep(Duration::from_millis(150));
+
+        let mut stream = UnixStream::connect(&socket_path).expect("client should connect");
+        let request = serde_json::to_vec(&DaemonRequest::GetState).expect("request should encode");
+        stream.write_all(&request).expect("request should write");
+        stream
+            .shutdown(Shutdown::Write)
+            .expect("shutdown write half");
+
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .expect("response should read");
+        let decoded: DaemonResponse =
+            serde_json::from_str(&response).expect("response should decode");
+
+        match decoded {
+            DaemonResponse::State { state } => {
+                assert_eq!(state.monitors.len(), 1);
+                assert_eq!(state.assignments.len(), 1);
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+
+        shutdown.store(true, Ordering::Relaxed);
+        handle.join().expect("server thread should finish");
+        fs::remove_file(&socket_path).ok();
+    }
+
+    #[test]
     fn reimport_refreshes_assigned_imported_asset_metadata() {
         let root = std::env::temp_dir().join(format!("backlayer-reimport-{}", std::process::id()));
         fs::create_dir_all(&root).expect("root should exist");
         let workshop_item = root.join("100");
         fs::create_dir_all(&workshop_item).expect("workshop item should exist");
+        unsafe {
+            std::env::set_var("BACKLAYER_ENABLE_WORKSHOP", "1");
+        }
         fs::write(
             workshop_item.join("project.json"),
             r#"{"title":"Original Title","type":"web","file":"index.html","workshopid":"100"}"#,
@@ -685,6 +808,9 @@ mod tests {
         fs::create_dir_all(&root).expect("root should exist");
         let workshop_item = root.join("101");
         fs::create_dir_all(&workshop_item).expect("workshop item should exist");
+        unsafe {
+            std::env::set_var("BACKLAYER_ENABLE_WORKSHOP", "1");
+        }
         fs::write(
             workshop_item.join("project.json"),
             r#"{"title":"Removable Item","type":"web","file":"index.html","workshopid":"101"}"#,
@@ -788,6 +914,7 @@ mod tests {
             compatibility: CompatibilityInfo::default(),
             import_metadata: None,
             entrypoint: "assets/demo.neon-grid/shaders/neon-grid.wgsl".into(),
+            asset_path: None,
         }
     }
 }

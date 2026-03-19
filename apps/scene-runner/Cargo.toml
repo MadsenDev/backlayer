@@ -7,6 +7,7 @@ authors.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+backlayer-hyprland.workspace = true
 backlayer-renderer-image.workspace = true
 backlayer-types.workspace = true
 backlayer-wayland.workspace = true

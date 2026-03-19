@@ -6,6 +6,7 @@
 - [x] Choose crate/package structure for Rust core and Tauri frontend
 - [x] Decide config file format and storage location
 - [x] Define wallpaper asset model and metadata format
+- [x] Add a native `.backlayer` wallpaper package format
 - [x] Define IPC contract between UI and daemon
 - [x] Add shared IPC request/response types
 - [x] Add sample asset directory structure to validate metadata decisions
@@ -38,6 +39,7 @@
 - [x] Allow reopening and editing existing native scene assets in the Scene Composer
 - [x] Replace the preset checklist composer with a node-based scene editor
 - [x] Redesign the Scene Composer into a viewport-first editor with tabbed side tools and progressive properties
+- [x] Add unified viewport direct-manipulation tools and handles for sprites, emitters, and particle areas
 - [x] Add real-time native scene playback for sprite, effect, and particle nodes
 - [x] Add a live editor preview based on the new scene graph instead of CSS overlays
 - [x] Add layer reordering and removal in the Scene Composer UI
@@ -52,16 +54,22 @@
 - [x] Add burst emission plus lifetime and speed ranges for native particle nodes
 - [x] Add over-life size, alpha, and color curves for native particle nodes
 - [x] Move advanced particle curve editing into a dedicated particle editor workflow
+- [x] Add sprite-based particle occluders and landing surfaces for native scenes
+- [x] Add viewport-drawn custom particle collider regions for sprite nodes
+- [x] Add standalone particle area nodes for scene-level occlusion and landing regions
+- [x] Add polygon support for standalone particle area nodes
 - [ ] Tighten visual parity between the Scene Composer preview and `scene-runner`
 
 ## Renderer: Video
 
 - [x] Add local Wallpaper Engine video item import/classification
 - [x] Route current video preview fallback through a dedicated runner process
+- [x] Add a first-pass FFmpeg-decoded video playback path in `video-runner`
+- [x] Respect FPS limiter and pause rules inside `video-runner`
 - [ ] Integrate `libmpv`
 - [ ] Prove hardware-accelerated playback path
-- [ ] Render video wallpapers into layer-shell surfaces
-- [ ] Add looping behavior and playback controls needed by the daemon
+- [x] Render video wallpapers into layer-shell surfaces
+- [x] Add looping behavior for daemon-managed video playback
 - [ ] Handle renderer restart on failure
 
 ## Renderer: Shader
@@ -101,6 +109,7 @@
 - [x] Spawn renderer instances per output
 - [x] Restart crashed renderers safely
 - [x] Expose IPC/API for the UI
+- [x] Reduce daemon request-time monitor refresh churn
 - [ ] Add structured logging
 
 ## Hyprland Integration
@@ -109,13 +118,15 @@
 - [x] Add monitor identity mapping that survives common layout changes
 - [x] Add polling-based monitor refresh in daemon `--serve` mode
 - [ ] Investigate Hyprland socket event integration
-- [ ] React to monitor changes without requiring daemon restart
+- [x] React to monitor changes without requiring daemon restart
 
 ## Performance / Power
 
 - [x] Add FPS limiter
 - [x] Add pause-on-fullscreen logic
 - [x] Add pause-on-battery behavior or defer explicitly
+- [x] Reduce idle wakeups in shader, video, and scene runners
+- [x] Decouple asset refresh from steady-state UI polling
 - [ ] Add idle/resource policy for hidden or inactive outputs
 - [ ] Benchmark CPU/GPU usage for each renderer type
 
@@ -138,32 +149,36 @@
 - [x] Allow deleting user-managed native wallpapers and imported wallpapers from the UI
 - [x] Move heavy Tauri UI commands off the main thread to reduce interaction freezes
 - [x] Show a startup splash before the main React app loads
+- [x] Add a unified Create picker for still image, scene, shader, and video wallpapers
+- [x] Make Scene Composer editing open immediately with progressive scene hydration
+- [x] Reduce Scene Composer and browser preview work to improve interaction responsiveness
 
 ## Packaging / Startup
 
 - [x] Add `systemd --user` service for daemon autostart
-- [ ] Define install flow for runtime, UI, and assets
+- [x] Define install flow for runtime, UI, and assets
 - [x] Document runtime dependencies like `mpv`/`libmpv`
 
 ## Testing
 
 - [x] Add unit tests for config parsing and monitor mapping
 - [ ] Add integration testing strategy for Hyprland environments
-- [ ] Add smoke test for daemon startup
+- [x] Add smoke test for daemon startup
 - [ ] Test fullscreen pause logic
 - [ ] Test multi-monitor assignment behavior
 - [ ] Test native scene animation behavior manually
 - [ ] Test the redesigned Scene Composer flow manually
 - [x] Test animated shader assignment behavior manually
 - [ ] Test renderer crash recovery behavior manually
+- [x] Document a manual verification matrix for the current MVP
 
 ## Documentation
 
 - [x] Write local development setup instructions
-- [ ] Document MVP architecture
+- [x] Document MVP architecture
 - [x] Document configuration format
 - [x] Document `systemd --user` supervision for daemon crash recovery
-- [ ] Document known limitations of the Hyprland-only MVP
+- [x] Document known limitations of the Hyprland-only MVP
 - [x] Keep `PROJECT_SUMMARY.md` aligned with implementation reality
 
 ## Release Readiness

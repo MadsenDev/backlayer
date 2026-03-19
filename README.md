@@ -2,7 +2,7 @@
 
 Backlayer is a Hyprland-first animated wallpaper runtime for Linux.
 
-It is built around a long-running daemon, Wayland layer-shell surfaces, dedicated renderer processes, and a native scene composer for creating animated wallpapers from images.
+It is built around a long-running daemon, Wayland layer-shell surfaces, dedicated renderer processes, a native scene composer for creating animated wallpapers from images, and a native `.backlayer` single-file wallpaper format.
 
 ## Current Scope
 
@@ -19,19 +19,26 @@ Workshop compatibility exists behind `BACKLAYER_ENABLE_WORKSHOP=1`, but native s
 
 - Per-monitor wallpaper assignment through `backlayerd`
 - Static image wallpapers with fit controls
+- First-pass video wallpapers through `video-runner` using `ffmpeg` / `ffprobe`
 - WGSL shader wallpapers, including animated shaders
 - Native scene wallpapers with:
   - sprite nodes
   - effect nodes
   - particle emitters
   - a full-screen Scene Composer
+- Native create flow for:
+  - still image wallpapers
+  - video wallpapers
+  - WGSL shader wallpapers
+  - scene wallpapers through the Scene Composer
+- Native wallpapers stored as single-file `.backlayer` assets
 - Pause-on-fullscreen and pause-on-battery behavior
 - Renderer supervision and `systemd --user` daemon recovery support
 
 ## What Is Still In Progress
 
-- Real video playback through `libmpv`
-- Hyprland hotplug/reactive output changes without restart
+- `libmpv` integration and hardware-accelerated video playback
+- More validation around Hyprland hotplug and multi-monitor behavior
 - Particle image sprites in the native scene engine
 - Tighter parity between Scene Composer preview and applied wallpaper
 - Broader Workshop runtime support
@@ -155,6 +162,21 @@ pnpm ui:build
 - [PROJECT_SUMMARY.md](PROJECT_SUMMARY.md)
 - [TODO.md](TODO.md)
 - [CHANGELOG.md](CHANGELOG.md)
+- [docs/install.md](docs/install.md)
+- [docs/architecture.md](docs/architecture.md)
+- [docs/limitations.md](docs/limitations.md)
+- [docs/manual-testing.md](docs/manual-testing.md)
 - [docs/configuration.md](docs/configuration.md)
 - [docs/systemd.md](docs/systemd.md)
 - [docs/animation-probe.md](docs/animation-probe.md)
+
+## Built-In Demo Assets
+
+The repo currently ships with native demo assets for each main path:
+
+- `demo.cyberpunk-city` image wallpaper
+- `demo.sunset-stripes` image wallpaper
+- `demo.prism-loop` video wallpaper
+- `demo.neon-grid` static shader
+- `demo.ember-scan` static shader
+- `demo.tide-pulse` animated shader

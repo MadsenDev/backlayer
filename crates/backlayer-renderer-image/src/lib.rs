@@ -440,6 +440,7 @@ mod tests {
             compatibility: CompatibilityInfo::default(),
             import_metadata: None,
             entrypoint: path.clone(),
+            asset_path: None,
         };
 
         renderer

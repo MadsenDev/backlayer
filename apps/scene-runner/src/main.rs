@@ -8,11 +8,12 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
+use backlayer_hyprland::HyprlandClient;
 use backlayer_renderer_image::ImageRenderer;
 use backlayer_types::{
     AssetMetadata, AssetSourceKind, CompatibilityInfo, ImageFitMode, NativeSceneDocument,
     SceneBehaviorKind, SceneBlendMode, SceneColorStop, SceneCurvePoint, SceneEffectKind,
-    SceneEmitterPreset, SceneEmitterShape, SceneNode, WallpaperKind,
+    SceneEmitterNode, SceneEmitterPreset, SceneEmitterShape, SceneNode, WallpaperKind,
 };
 use backlayer_wayland::LayerShellRuntime;
 use image::{DynamicImage, Rgba, RgbaImage, imageops};
@@ -21,6 +22,8 @@ use pollster::block_on;
 use serde_json::Value;
 use tracing::{debug, info};
 use wgpu::util::DeviceExt;
+
+const POLICY_CHECK_INTERVAL: Duration = Duration::from_millis(250);
 
 const SPRITE_SHADER: &str = r#"
 struct SpriteUniforms {
@@ -225,17 +228,25 @@ fn main() -> Result<()> {
     let output_name = std::env::args()
         .nth(1)
         .context("missing output name argument")?;
-    let asset_id = std::env::args()
+    let fps = std::env::args()
         .nth(2)
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(24)
+        .max(1);
+    let pause_on_fullscreen = std::env::args().nth(3).as_deref() == Some("1");
+    let pause_on_battery = std::env::args().nth(4).as_deref() == Some("1");
+    let asset_id = std::env::args()
+        .nth(5)
         .unwrap_or_else(|| "scene-runner".to_string());
     let preview_path = std::env::args()
-        .nth(3)
+        .nth(6)
         .filter(|value| !value.is_empty())
         .map(PathBuf::from);
     let original_entrypoint = std::env::args()
-        .nth(4)
+        .nth(7)
         .map(PathBuf::from)
         .context("missing original scene entrypoint")?;
+    let debug_particle_areas = env_flag_enabled("BACKLAYER_DEBUG_PARTICLE_AREAS");
 
     let runtime = LayerShellRuntime::new();
     let mut session = runtime
@@ -244,7 +255,7 @@ fn main() -> Result<()> {
     if let Some(mut scene_runtime) =
         load_native_scene_runtime(&original_entrypoint).context("failed to load native scene")?
     {
-        let mut gpu_runtime = GpuSceneRuntime::new(&session, &scene_runtime)
+        let mut gpu_runtime = GpuSceneRuntime::new(&session, &scene_runtime, debug_particle_areas)
             .context("failed to create native GPU scene runtime")?;
         scene_runtime.canvas_size = gpu_runtime.output_size();
         scene_runtime.update_emitters(1.0 / 120.0);
@@ -253,6 +264,9 @@ fn main() -> Result<()> {
             .context("failed to render initial native scene frame")?;
         info!(
             output = %output_name,
+            fps,
+            pause_on_fullscreen,
+            pause_on_battery,
             asset_id = %asset_id,
             source = %original_entrypoint.display(),
             runtime_mode = "native_scene_v2",
@@ -261,24 +275,39 @@ fn main() -> Result<()> {
         );
 
         let started_at = Instant::now();
-        let frame_interval = Duration::from_millis(41);
-        let mut last_frame = Instant::now();
+        let frame_interval = Duration::from_millis((1000 / fps).max(1));
+        let hyprland = HyprlandClient::new();
+        let power = PowerStateProbe::default();
+        let mut next_frame_at = Instant::now() + frame_interval;
         loop {
             session
                 .dispatch_pending()
                 .map_err(|error| anyhow!("wayland dispatch failed: {error}"))?;
 
-            if last_frame.elapsed() >= frame_interval {
+            let now = Instant::now();
+            let paused_for_fullscreen =
+                pause_on_fullscreen && hyprland.fullscreen_active().unwrap_or(false);
+            let paused_for_battery = pause_on_battery && power.on_battery().unwrap_or(false);
+            let paused = paused_for_fullscreen || paused_for_battery;
+
+            if !paused && now >= next_frame_at {
                 let elapsed = started_at.elapsed().as_secs_f32();
-                let dt = last_frame.elapsed().as_secs_f32();
+                let dt = frame_interval.as_secs_f32();
                 scene_runtime.update_emitters(dt);
                 gpu_runtime
                     .render_scene(&scene_runtime, elapsed)
                     .map_err(|error| anyhow!("scene frame render failed: {error}"))?;
-                last_frame = Instant::now();
+                next_frame_at = now + frame_interval;
             }
 
-            thread::sleep(Duration::from_millis(8));
+            let sleep_for = if paused {
+                POLICY_CHECK_INTERVAL
+            } else {
+                next_frame_at
+                    .saturating_duration_since(Instant::now())
+                    .min(POLICY_CHECK_INTERVAL)
+            };
+            thread::sleep(sleep_for);
         }
     }
 
@@ -296,6 +325,7 @@ fn main() -> Result<()> {
         compatibility: CompatibilityInfo::default(),
         import_metadata: None,
         entrypoint: resolved.path.clone(),
+        asset_path: None,
     };
 
     let detail = renderer
@@ -316,7 +346,7 @@ fn main() -> Result<()> {
         session
             .dispatch_pending()
             .map_err(|error| anyhow!("wayland dispatch failed: {error}"))?;
-        thread::sleep(Duration::from_millis(16));
+        thread::sleep(POLICY_CHECK_INTERVAL);
     }
 }
 
@@ -362,6 +392,53 @@ fn resolve_runtime_target(
         "no supported local image or preview fallback was found for {}",
         entrypoint.display()
     ))
+}
+
+#[derive(Debug, Clone)]
+struct PowerStateProbe {
+    power_supply_root: PathBuf,
+}
+
+impl Default for PowerStateProbe {
+    fn default() -> Self {
+        Self {
+            power_supply_root: PathBuf::from("/sys/class/power_supply"),
+        }
+    }
+}
+
+impl PowerStateProbe {
+    fn on_battery(&self) -> std::io::Result<bool> {
+        self.on_battery_at(&self.power_supply_root)
+    }
+
+    fn on_battery_at(&self, root: &Path) -> std::io::Result<bool> {
+        let mut saw_battery = false;
+        let mut saw_online_external_power = false;
+
+        for entry in fs::read_dir(root)? {
+            let path = entry?.path();
+            let kind = fs::read_to_string(path.join("type")).unwrap_or_default();
+            match kind.trim() {
+                "Battery" => {
+                    saw_battery = true;
+                    let status = fs::read_to_string(path.join("status")).unwrap_or_default();
+                    if status.trim() == "Discharging" {
+                        return Ok(true);
+                    }
+                }
+                "Mains" | "USB" | "USB_C" => {
+                    let online = fs::read_to_string(path.join("online")).unwrap_or_default();
+                    if online.trim() == "1" {
+                        saw_online_external_power = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        Ok(saw_battery && !saw_online_external_power)
+    }
 }
 
 fn compose_scene_target(entrypoint: &Path) -> Result<Option<PathBuf>> {
@@ -452,6 +529,18 @@ struct SceneParticle {
     max_life: f32,
     size: f32,
     alpha: f32,
+    landed: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ParticleBlocker {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    polygon: Vec<(f32, f32)>,
+    occluder: bool,
+    surface: bool,
 }
 
 #[repr(C)]
@@ -524,10 +613,12 @@ struct GpuSceneRuntime {
     particle_instance_buffer: wgpu::Buffer,
     particle_capacity: usize,
     surface_size: (u32, u32),
+    debug_particle_areas: bool,
 }
 
 impl NativeSceneRuntime {
     fn update_emitters(&mut self, delta_seconds: f32) {
+        let blockers = build_particle_blockers(self);
         for emitter in self.document.nodes.iter().filter_map(|node| match node {
             SceneNode::Emitter(emitter) if emitter.enabled => Some(emitter),
             _ => None,
@@ -546,11 +637,33 @@ impl NativeSceneRuntime {
                     if state.particles.len() >= emitter.max_particles as usize {
                         break;
                     }
-                    state
-                        .particles
-                        .push(spawn_particle(emitter, self.canvas_size, &mut state.seed));
+                    state.particles.push(spawn_particle(
+                        emitter,
+                        self.canvas_size,
+                        &mut state.seed,
+                    ));
                 }
                 state.burst_fired = true;
+            }
+
+            if state.particles.is_empty() && emitter.emission_rate > 0.0 {
+                let average_life =
+                    (resolve_emitter_min_life(emitter) + resolve_emitter_max_life(emitter)) * 0.5;
+                let warm_count = ((emitter.emission_rate * average_life).round() as usize)
+                    .min(emitter.max_particles as usize);
+                for _ in 0..warm_count {
+                    if state.particles.len() >= emitter.max_particles as usize {
+                        break;
+                    }
+                    let warm_age =
+                        average_life * ((next_u32(&mut state.seed) as f32) / (u32::MAX as f32));
+                    state.particles.push(spawn_particle_with_age(
+                        emitter,
+                        self.canvas_size,
+                        &mut state.seed,
+                        Some(warm_age),
+                    ));
+                }
             }
 
             state.accumulator += emitter.emission_rate * delta_seconds;
@@ -567,13 +680,17 @@ impl NativeSceneRuntime {
             }
 
             for particle in &mut state.particles {
-                particle.vx += emitter.gravity_x * delta_seconds;
-                particle.vy += emitter.gravity_y * delta_seconds;
-                let drag_scale = (1.0 - emitter.drag * delta_seconds).clamp(0.0, 1.0);
-                particle.vx *= drag_scale;
-                particle.vy *= drag_scale;
-                particle.x += particle.vx * delta_seconds;
-                particle.y += particle.vy * delta_seconds;
+                if !particle.landed {
+                    particle.vx += emitter.gravity_x * delta_seconds;
+                    particle.vy += emitter.gravity_y * delta_seconds;
+                    let drag_scale = (1.0 - emitter.drag * delta_seconds * 0.08).clamp(0.0, 1.0);
+                    particle.vx *= drag_scale;
+                    particle.vy *= drag_scale;
+                    let previous_y = particle.y;
+                    particle.x += particle.vx * delta_seconds;
+                    particle.y += particle.vy * delta_seconds;
+                    resolve_particle_surface_collision(emitter, particle, previous_y, &blockers);
+                }
                 particle.life += delta_seconds;
             }
 
@@ -638,6 +755,7 @@ impl GpuSceneRuntime {
     fn new(
         session: &backlayer_wayland::LayerSurfaceSession,
         scene: &NativeSceneRuntime,
+        debug_particle_areas: bool,
     ) -> Result<Self> {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
         let surface = unsafe { session.create_wgpu_surface(&instance) }
@@ -685,16 +803,17 @@ impl GpuSceneRuntime {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let particle_uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("backlayer-scene-particle-uniforms"),
-            contents: bytemuck::bytes_of(&ParticleUniforms {
-                surface_width: surface_width as f32,
-                surface_height: surface_height as f32,
-                _padding0: 0.0,
-                _padding1: 0.0,
-            }),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
+        let particle_uniform_buffer =
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("backlayer-scene-particle-uniforms"),
+                contents: bytemuck::bytes_of(&ParticleUniforms {
+                    surface_width: surface_width as f32,
+                    surface_height: surface_height as f32,
+                    _padding0: 0.0,
+                    _padding1: 0.0,
+                }),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
 
         let sprite_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -830,11 +949,13 @@ impl GpuSceneRuntime {
         });
         let particle_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("backlayer-scene-particle-pipeline"),
-            layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("backlayer-scene-particle-pipeline"),
-                bind_group_layouts: &[&particle_bind_group_layout],
-                push_constant_ranges: &[],
-            })),
+            layout: Some(
+                &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("backlayer-scene-particle-pipeline"),
+                    bind_group_layouts: &[&particle_bind_group_layout],
+                    push_constant_ranges: &[],
+                }),
+            ),
             vertex: wgpu::VertexState {
                 module: &particle_shader,
                 entry_point: Some("vs_main"),
@@ -934,6 +1055,7 @@ impl GpuSceneRuntime {
             particle_instance_buffer,
             particle_capacity,
             surface_size: (surface_width, surface_height),
+            debug_particle_areas,
         })
     }
 
@@ -942,7 +1064,13 @@ impl GpuSceneRuntime {
     }
 
     fn render_scene(&mut self, scene: &NativeSceneRuntime, time_seconds: f32) -> Result<()> {
-        let particle_instances = build_particle_instances(scene);
+        let mut particle_instances = build_particle_instances(scene);
+        if self.debug_particle_areas {
+            particle_instances.extend(build_debug_particle_area_instances(
+                scene,
+                self.surface_size,
+            ));
+        }
         let particle_count = particle_instances.len().min(self.particle_capacity);
         if particle_count > 0 {
             self.queue.write_buffer(
@@ -1080,6 +1208,15 @@ fn spawn_particle(
     canvas_size: (u32, u32),
     seed: &mut u64,
 ) -> SceneParticle {
+    spawn_particle_with_age(emitter, canvas_size, seed, None)
+}
+
+fn spawn_particle_with_age(
+    emitter: &backlayer_types::SceneEmitterNode,
+    canvas_size: (u32, u32),
+    seed: &mut u64,
+    age_override: Option<f32>,
+) -> SceneParticle {
     let random = |seed: &mut u64| -> f32 { (next_u32(seed) as f32) / (u32::MAX as f32) };
     let (origin_x, origin_y) = emitter_origin_pixels(emitter, canvas_size);
     let (spawn_x, spawn_y) =
@@ -1092,18 +1229,349 @@ fn spawn_particle(
     let speed = min_speed + (random(seed) * (max_speed - min_speed));
     let min_life = resolve_emitter_min_life(emitter);
     let max_life = resolve_emitter_max_life(emitter);
-    let life = min_life + (random(seed) * (max_life - min_life));
+    let max_life_value = min_life + (random(seed) * (max_life - min_life));
+    let age = age_override.unwrap_or(0.0).clamp(0.0, max_life_value);
+    let drag_scale = (1.0 - emitter.drag * age * 0.08).max(0.0);
+    let vx = speed * angle.cos() * drag_scale;
+    let vy = speed * angle.sin() * drag_scale;
 
     SceneParticle {
-        x: spawn_x,
-        y: spawn_y,
-        vx: speed * angle.cos(),
-        vy: speed * angle.sin(),
-        life: 0.0,
-        max_life: life,
+        x: spawn_x + (vx * age) + (0.5 * emitter.gravity_x * age * age),
+        y: spawn_y + (vy * age) + (0.5 * emitter.gravity_y * age * age),
+        vx,
+        vy,
+        life: age,
+        max_life: max_life_value,
         size: emitter.size * (0.55 + random(seed) * 0.7),
         alpha: emitter.opacity * (0.55 + random(seed) * 0.45),
+        landed: false,
     }
+}
+
+fn build_particle_blockers(scene: &NativeSceneRuntime) -> Vec<ParticleBlocker> {
+    let mut blockers = Vec::new();
+    for sprite in scene.document.nodes.iter().filter_map(|node| match node {
+        SceneNode::Sprite(sprite) if sprite.enabled => Some(sprite),
+        _ => None,
+    }) {
+        if !sprite.particle_occluder && !sprite.particle_surface {
+            continue;
+        }
+        let Some(image) = scene.images.get(&sprite.image_key) else {
+            continue;
+        };
+        let (width, height, x, y, _) = scene_sprite_layout(scene.canvas_size, image, sprite, 0.0);
+        let (x, y, width, height) =
+            resolve_particle_blocker_rect((x, y, width, height), sprite.particle_region.as_ref());
+        blockers.push(ParticleBlocker {
+            x,
+            y,
+            width,
+            height,
+            polygon: Vec::new(),
+            occluder: sprite.particle_occluder,
+            surface: sprite.particle_surface,
+        });
+    }
+    for area in scene.document.nodes.iter().filter_map(|node| match node {
+        SceneNode::ParticleArea(area) if area.enabled => Some(area),
+        _ => None,
+    }) {
+        blockers.push(ParticleBlocker {
+            x: scene.canvas_size.0 as f32 * area.region.x,
+            y: scene.canvas_size.1 as f32 * area.region.y,
+            width: scene.canvas_size.0 as f32 * area.region.width,
+            height: scene.canvas_size.1 as f32 * area.region.height,
+            polygon: if area.shape == Some(backlayer_types::SceneParticleAreaShape::Polygon) {
+                area.points
+                    .iter()
+                    .map(|point| {
+                        (
+                            scene.canvas_size.0 as f32 * point.x,
+                            scene.canvas_size.1 as f32 * point.y,
+                        )
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            },
+            occluder: area.occluder,
+            surface: area.surface,
+        });
+    }
+    blockers
+}
+
+fn resolve_particle_blocker_rect(
+    layout: (f32, f32, f32, f32),
+    region: Option<&backlayer_types::SceneNormalizedRect>,
+) -> (f32, f32, f32, f32) {
+    let (x, y, width, height) = layout;
+    let Some(region) = region else {
+        return (x, y, width, height);
+    };
+    (
+        x + (width * region.x.clamp(0.0, 1.0)),
+        y + (height * region.y.clamp(0.0, 1.0)),
+        width * region.width.clamp(0.0, 1.0),
+        height * region.height.clamp(0.0, 1.0),
+    )
+}
+
+fn particle_is_occluded(blockers: &[ParticleBlocker], x: f32, y: f32, radius: f32) -> bool {
+    blockers
+        .iter()
+        .any(|blocker| blocker.occluder && blocker_contains(blocker, x, y, radius))
+}
+
+fn particle_segment_is_occluded(
+    blockers: &[ParticleBlocker],
+    start: (f32, f32),
+    end: (f32, f32),
+    thickness_radius: f32,
+) -> bool {
+    blockers.iter().any(|blocker| {
+        blocker.occluder && blocker_contains_segment(blocker, start, end, thickness_radius)
+    })
+}
+
+fn resolve_particle_surface_collision(
+    emitter: &SceneEmitterNode,
+    particle: &mut SceneParticle,
+    previous_y: f32,
+    blockers: &[ParticleBlocker],
+) {
+    let radius = particle.size.max(1.0);
+    let Some(surface) = blockers
+        .iter()
+        .filter_map(|blocker| {
+            if !blocker.surface {
+                return None;
+            }
+            let surface_y = blocker_surface_y(blocker, particle.x)?;
+            if previous_y <= surface_y && particle.y + radius >= surface_y {
+                Some(surface_y)
+            } else {
+                None
+            }
+        })
+        .min_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal))
+    else {
+        return;
+    };
+
+    match emitter.preset {
+        SceneEmitterPreset::Snow | SceneEmitterPreset::Dust => {
+            particle.y = surface - radius;
+            particle.vx *= 0.15;
+            particle.vy = 0.0;
+            particle.landed = true;
+        }
+        SceneEmitterPreset::Rain | SceneEmitterPreset::Embers => {
+            particle.life = particle.max_life;
+        }
+    }
+}
+
+fn blocker_contains(blocker: &ParticleBlocker, x: f32, y: f32, radius: f32) -> bool {
+    if blocker.polygon.len() >= 3 {
+        polygon_intersects_circle(&blocker.polygon, x, y, radius)
+    } else {
+        x >= blocker.x
+            && x <= blocker.x + blocker.width
+            && y + radius >= blocker.y
+            && y - radius <= blocker.y + blocker.height
+    }
+}
+
+fn blocker_contains_segment(
+    blocker: &ParticleBlocker,
+    start: (f32, f32),
+    end: (f32, f32),
+    thickness_radius: f32,
+) -> bool {
+    if blocker.polygon.len() >= 3 {
+        polygon_intersects_segment(&blocker.polygon, start, end, thickness_radius)
+    } else {
+        let left = blocker.x - thickness_radius;
+        let right = blocker.x + blocker.width + thickness_radius;
+        let top = blocker.y - thickness_radius;
+        let bottom = blocker.y + blocker.height + thickness_radius;
+        point_in_rect(start, left, top, right, bottom)
+            || point_in_rect(end, left, top, right, bottom)
+            || segment_intersects_segment(start, end, (left, top), (right, top))
+            || segment_intersects_segment(start, end, (right, top), (right, bottom))
+            || segment_intersects_segment(start, end, (right, bottom), (left, bottom))
+            || segment_intersects_segment(start, end, (left, bottom), (left, top))
+    }
+}
+
+fn blocker_surface_y(blocker: &ParticleBlocker, x: f32) -> Option<f32> {
+    if blocker.polygon.len() >= 3 {
+        polygon_surface_y(&blocker.polygon, x)
+    } else if x >= blocker.x && x <= blocker.x + blocker.width {
+        Some(blocker.y)
+    } else {
+        None
+    }
+}
+
+fn point_in_polygon(points: &[(f32, f32)], x: f32, y: f32) -> bool {
+    let mut inside = false;
+    let mut previous = points.len() - 1;
+    for current in 0..points.len() {
+        let (x1, y1) = points[current];
+        let (x2, y2) = points[previous];
+        let intersects = ((y1 > y) != (y2 > y))
+            && (x < (x2 - x1) * (y - y1) / ((y2 - y1).abs().max(f32::EPSILON)) + x1);
+        if intersects {
+            inside = !inside;
+        }
+        previous = current;
+    }
+    inside
+}
+
+fn polygon_intersects_circle(points: &[(f32, f32)], x: f32, y: f32, radius: f32) -> bool {
+    if point_in_polygon(points, x, y) {
+        return true;
+    }
+    let radius_sq = radius * radius;
+    for index in 0..points.len() {
+        let a = points[index];
+        let b = points[(index + 1) % points.len()];
+        if distance_sq_to_segment((x, y), a, b) <= radius_sq {
+            return true;
+        }
+    }
+    false
+}
+
+fn polygon_intersects_segment(
+    points: &[(f32, f32)],
+    start: (f32, f32),
+    end: (f32, f32),
+    thickness_radius: f32,
+) -> bool {
+    if point_in_polygon(points, start.0, start.1) || point_in_polygon(points, end.0, end.1) {
+        return true;
+    }
+    let thickness_sq = thickness_radius * thickness_radius;
+    for index in 0..points.len() {
+        let a = points[index];
+        let b = points[(index + 1) % points.len()];
+        if segment_intersects_segment(start, end, a, b) {
+            return true;
+        }
+        if distance_sq_between_segments(start, end, a, b) <= thickness_sq {
+            return true;
+        }
+    }
+    false
+}
+
+fn point_in_rect(point: (f32, f32), left: f32, top: f32, right: f32, bottom: f32) -> bool {
+    point.0 >= left && point.0 <= right && point.1 >= top && point.1 <= bottom
+}
+
+fn orientation(a: (f32, f32), b: (f32, f32), c: (f32, f32)) -> f32 {
+    ((b.1 - a.1) * (c.0 - b.0)) - ((b.0 - a.0) * (c.1 - b.1))
+}
+
+fn on_segment(a: (f32, f32), b: (f32, f32), c: (f32, f32)) -> bool {
+    b.0 >= a.0.min(c.0)
+        && b.0 <= a.0.max(c.0)
+        && b.1 >= a.1.min(c.1)
+        && b.1 <= a.1.max(c.1)
+}
+
+fn segment_intersects_segment(
+    p1: (f32, f32),
+    q1: (f32, f32),
+    p2: (f32, f32),
+    q2: (f32, f32),
+) -> bool {
+    let o1 = orientation(p1, q1, p2);
+    let o2 = orientation(p1, q1, q2);
+    let o3 = orientation(p2, q2, p1);
+    let o4 = orientation(p2, q2, q1);
+
+    if ((o1 > 0.0 && o2 < 0.0) || (o1 < 0.0 && o2 > 0.0))
+        && ((o3 > 0.0 && o4 < 0.0) || (o3 < 0.0 && o4 > 0.0))
+    {
+        return true;
+    }
+
+    if o1.abs() <= f32::EPSILON && on_segment(p1, p2, q1) {
+        return true;
+    }
+    if o2.abs() <= f32::EPSILON && on_segment(p1, q2, q1) {
+        return true;
+    }
+    if o3.abs() <= f32::EPSILON && on_segment(p2, p1, q2) {
+        return true;
+    }
+    if o4.abs() <= f32::EPSILON && on_segment(p2, q1, q2) {
+        return true;
+    }
+
+    false
+}
+
+fn distance_sq_between_segments(
+    a1: (f32, f32),
+    a2: (f32, f32),
+    b1: (f32, f32),
+    b2: (f32, f32),
+) -> f32 {
+    let d1 = distance_sq_to_segment(a1, b1, b2);
+    let d2 = distance_sq_to_segment(a2, b1, b2);
+    let d3 = distance_sq_to_segment(b1, a1, a2);
+    let d4 = distance_sq_to_segment(b2, a1, a2);
+    d1.min(d2).min(d3).min(d4)
+}
+
+fn distance_sq_to_segment(point: (f32, f32), a: (f32, f32), b: (f32, f32)) -> f32 {
+    let ab_x = b.0 - a.0;
+    let ab_y = b.1 - a.1;
+    let ap_x = point.0 - a.0;
+    let ap_y = point.1 - a.1;
+    let ab_len_sq = (ab_x * ab_x) + (ab_y * ab_y);
+    if ab_len_sq <= f32::EPSILON {
+        let dx = point.0 - a.0;
+        let dy = point.1 - a.1;
+        return (dx * dx) + (dy * dy);
+    }
+    let t = ((ap_x * ab_x) + (ap_y * ab_y)) / ab_len_sq;
+    let t = t.clamp(0.0, 1.0);
+    let closest_x = a.0 + (ab_x * t);
+    let closest_y = a.1 + (ab_y * t);
+    let dx = point.0 - closest_x;
+    let dy = point.1 - closest_y;
+    (dx * dx) + (dy * dy)
+}
+
+fn polygon_surface_y(points: &[(f32, f32)], x: f32) -> Option<f32> {
+    let mut hits = Vec::new();
+    for index in 0..points.len() {
+        let (x1, y1) = points[index];
+        let (x2, y2) = points[(index + 1) % points.len()];
+        let min_x = x1.min(x2);
+        let max_x = x1.max(x2);
+        if x < min_x || x > max_x {
+            continue;
+        }
+        if (x2 - x1).abs() <= f32::EPSILON {
+            hits.push(y1.min(y2));
+            continue;
+        }
+        let t = (x - x1) / (x2 - x1);
+        if !(0.0..=1.0).contains(&t) {
+            continue;
+        }
+        hits.push(y1 + ((y2 - y1) * t));
+    }
+    hits.into_iter().reduce(f32::min)
 }
 
 fn default_emitter_origin_x(preset: &SceneEmitterPreset) -> f32 {
@@ -1201,12 +1669,15 @@ fn resolve_emitter_min_speed(emitter: &backlayer_types::SceneEmitterNode) -> f32
 }
 
 fn resolve_emitter_max_speed(emitter: &backlayer_types::SceneEmitterNode) -> f32 {
-    emitter.max_speed.unwrap_or(match emitter.preset {
-        SceneEmitterPreset::Embers => 110.0,
-        SceneEmitterPreset::Rain => 620.0,
-        SceneEmitterPreset::Dust => 42.0,
-        SceneEmitterPreset::Snow => 58.0,
-    }).max(resolve_emitter_min_speed(emitter))
+    emitter
+        .max_speed
+        .unwrap_or(match emitter.preset {
+            SceneEmitterPreset::Embers => 110.0,
+            SceneEmitterPreset::Rain => 620.0,
+            SceneEmitterPreset::Dust => 42.0,
+            SceneEmitterPreset::Snow => 58.0,
+        })
+        .max(resolve_emitter_min_speed(emitter))
 }
 
 fn resolve_emitter_min_life(emitter: &backlayer_types::SceneEmitterNode) -> f32 {
@@ -1219,12 +1690,15 @@ fn resolve_emitter_min_life(emitter: &backlayer_types::SceneEmitterNode) -> f32 
 }
 
 fn resolve_emitter_max_life(emitter: &backlayer_types::SceneEmitterNode) -> f32 {
-    emitter.max_life.unwrap_or(match emitter.preset {
-        SceneEmitterPreset::Embers => 5.0,
-        SceneEmitterPreset::Rain => 2.5,
-        SceneEmitterPreset::Dust => 9.0,
-        SceneEmitterPreset::Snow => 9.0,
-    }).max(resolve_emitter_min_life(emitter))
+    emitter
+        .max_life
+        .unwrap_or(match emitter.preset {
+            SceneEmitterPreset::Embers => 5.0,
+            SceneEmitterPreset::Rain => 2.5,
+            SceneEmitterPreset::Dust => 9.0,
+            SceneEmitterPreset::Snow => 9.0,
+        })
+        .max(resolve_emitter_min_life(emitter))
 }
 
 fn default_effect_color_hex(effect: &SceneEffectKind) -> &'static str {
@@ -1259,8 +1733,14 @@ fn emitter_spawn_region(
     canvas_size: (u32, u32),
 ) -> (f32, f32) {
     (
-        canvas_size.0 as f32 * emitter.region_width.unwrap_or(default_emitter_region_width(&emitter.preset)),
-        canvas_size.1 as f32 * emitter.region_height.unwrap_or(default_emitter_region_height(&emitter.preset)),
+        canvas_size.0 as f32
+            * emitter
+                .region_width
+                .unwrap_or(default_emitter_region_width(&emitter.preset)),
+        canvas_size.1 as f32
+            * emitter
+                .region_height
+                .unwrap_or(default_emitter_region_height(&emitter.preset)),
     )
 }
 
@@ -1272,7 +1752,11 @@ fn sample_emitter_position(
     origin_y: f32,
 ) -> (f32, f32) {
     let random = |seed: &mut u64| -> f32 { (next_u32(seed) as f32) / (u32::MAX as f32) };
-    match emitter.shape.clone().unwrap_or_else(|| default_emitter_shape(&emitter.preset)) {
+    match emitter
+        .shape
+        .clone()
+        .unwrap_or_else(|| default_emitter_shape(&emitter.preset))
+    {
         SceneEmitterShape::Point => (origin_x, origin_y),
         SceneEmitterShape::Box => {
             let (spawn_width, spawn_height) = emitter_spawn_region(emitter, canvas_size);
@@ -1282,8 +1766,14 @@ fn sample_emitter_position(
             )
         }
         SceneEmitterShape::Line => {
-            let length = canvas_size.0 as f32 * emitter.line_length.unwrap_or(default_emitter_line_length(&emitter.preset));
-            let angle = emitter.line_angle_deg.unwrap_or(default_emitter_line_angle_deg(&emitter.preset)).to_radians();
+            let length = canvas_size.0 as f32
+                * emitter
+                    .line_length
+                    .unwrap_or(default_emitter_line_length(&emitter.preset));
+            let angle = emitter
+                .line_angle_deg
+                .unwrap_or(default_emitter_line_angle_deg(&emitter.preset))
+                .to_radians();
             let offset = (random(seed) - 0.5) * length;
             (
                 origin_x + angle.cos() * offset,
@@ -1291,7 +1781,9 @@ fn sample_emitter_position(
             )
         }
         SceneEmitterShape::Circle => {
-            let radius = emitter.region_radius.unwrap_or(default_emitter_region_radius(&emitter.preset))
+            let radius = emitter
+                .region_radius
+                .unwrap_or(default_emitter_region_radius(&emitter.preset))
                 * canvas_size.0.min(canvas_size.1) as f32;
             let theta = random(seed) * std::f32::consts::TAU;
             let distance = random(seed).sqrt() * radius;
@@ -1308,6 +1800,23 @@ fn emitter_direction_radians(emitter: &backlayer_types::SceneEmitterNode) -> f32
         .direction_deg
         .unwrap_or(default_emitter_direction_deg(&emitter.preset))
         .to_radians()
+}
+
+fn emitter_particle_rotation_radians(emitter: &backlayer_types::SceneEmitterNode) -> f32 {
+    emitter.particle_rotation_deg.unwrap_or(0.0).to_radians()
+}
+
+fn rendered_particle_angle_radians(
+    emitter: &backlayer_types::SceneEmitterNode,
+    vx: f32,
+    vy: f32,
+) -> f32 {
+    let rotation = emitter_particle_rotation_radians(emitter);
+    if matches!(emitter.preset, SceneEmitterPreset::Rain) {
+        vy.atan2(vx) - (std::f32::consts::FRAC_PI_2) + rotation
+    } else {
+        rotation
+    }
 }
 
 fn parse_emitter_color(emitter: &backlayer_types::SceneEmitterNode) -> [f32; 3] {
@@ -1526,13 +2035,25 @@ fn effect_kind_to_u32(effect: &SceneEffectKind) -> u32 {
     }
 }
 
+fn env_flag_enabled(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
 fn build_particle_instances(scene: &NativeSceneRuntime) -> Vec<ParticleInstance> {
     let mut instances = Vec::new();
+    let blockers = build_particle_blockers(scene);
     for emitter in scene.document.nodes.iter().filter_map(|node| match node {
         SceneNode::Emitter(emitter) if emitter.enabled => Some(emitter),
         _ => None,
     }) {
-        let Some(state) = scene.emitters.iter().find(|state| state.node_id == emitter.id) else {
+        let Some(state) = scene
+            .emitters
+            .iter()
+            .find(|state| state.node_id == emitter.id)
+        else {
             continue;
         };
         for particle in &state.particles {
@@ -1541,37 +2062,56 @@ fn build_particle_instances(scene: &NativeSceneRuntime) -> Vec<ParticleInstance>
             let alpha_curve = evaluate_scalar_curve(&emitter.alpha_curve, progress, life_t);
             let alpha = (particle.alpha * alpha_curve).clamp(0.0, 1.0);
             let size_curve = evaluate_scalar_curve(&emitter.size_curve, progress, 1.0);
-            let color = evaluate_color_curve(&emitter.color_curve, progress, parse_emitter_color(emitter));
+            let color =
+                evaluate_color_curve(&emitter.color_curve, progress, parse_emitter_color(emitter));
+            let base_radius = (particle.size * size_curve).max(1.0);
+            let render_angle = rendered_particle_angle_radians(emitter, particle.vx, particle.vy);
             let (size_x, size_y, angle, shape, alpha_scale) = match emitter.preset {
                 SceneEmitterPreset::Rain => (
-                    particle.size * size_curve * 1.2,
-                    particle.size * size_curve * 8.5,
-                    particle.vy.atan2(particle.vx),
+                    base_radius * 1.2,
+                    base_radius * 8.5,
+                    render_angle,
                     0.0,
                     0.92,
                 ),
                 SceneEmitterPreset::Snow => (
-                    particle.size * size_curve * 2.0,
-                    particle.size * size_curve * 2.0,
-                    0.0,
+                    base_radius * 2.0,
+                    base_radius * 2.0,
+                    render_angle,
                     1.0,
                     0.86,
                 ),
                 SceneEmitterPreset::Dust => (
-                    particle.size * size_curve * 2.2,
-                    particle.size * size_curve * 2.2,
-                    0.0,
+                    base_radius * 2.2,
+                    base_radius * 2.2,
+                    render_angle,
                     1.0,
                     0.7,
                 ),
                 SceneEmitterPreset::Embers => (
-                    particle.size * size_curve * 2.0,
-                    particle.size * size_curve * 2.0,
-                    0.0,
+                    base_radius * 2.0,
+                    base_radius * 2.0,
+                    render_angle,
                     1.0,
                     1.0,
                 ),
             };
+            let occluded = if matches!(emitter.preset, SceneEmitterPreset::Rain) {
+                let dx = angle.cos() * size_y * 0.5;
+                let dy = angle.sin() * size_y * 0.5;
+                particle_segment_is_occluded(
+                    &blockers,
+                    (particle.x - dx, particle.y - dy),
+                    (particle.x + dx, particle.y + dy),
+                    size_x.max(1.5) * 0.5,
+                )
+            } else {
+                let occlusion_radius = size_x.max(size_y) * 0.5;
+                particle_is_occluded(&blockers, particle.x, particle.y, occlusion_radius)
+            };
+            if occluded {
+                continue;
+            }
             instances.push(ParticleInstance {
                 center_x: particle.x,
                 center_y: particle.y,
@@ -1589,6 +2129,78 @@ fn build_particle_instances(scene: &NativeSceneRuntime) -> Vec<ParticleInstance>
     instances
 }
 
+fn build_debug_particle_area_instances(
+    scene: &NativeSceneRuntime,
+    surface_size: (u32, u32),
+) -> Vec<ParticleInstance> {
+    let mut instances = Vec::new();
+    for area in scene.document.nodes.iter().filter_map(|node| match node {
+        SceneNode::ParticleArea(area) if area.enabled => Some(area),
+        _ => None,
+    }) {
+        let color = if area.occluder && area.surface {
+            [0.98, 0.88, 0.28, 0.95]
+        } else if area.occluder {
+            [0.25, 0.95, 0.45, 0.95]
+        } else if area.surface {
+            [0.28, 0.72, 0.98, 0.95]
+        } else {
+            [0.95, 0.95, 0.95, 0.85]
+        };
+        if area.shape == Some(backlayer_types::SceneParticleAreaShape::Polygon) {
+            let points = area
+                .points
+                .iter()
+                .map(|point| {
+                    (
+                        point.x * surface_size.0 as f32,
+                        point.y * surface_size.1 as f32,
+                    )
+                })
+                .collect::<Vec<_>>();
+            for window in points.windows(2) {
+                push_debug_segment(&mut instances, window[0], window[1], color);
+            }
+            if let (Some(first), Some(last)) = (points.first().copied(), points.last().copied()) {
+                push_debug_segment(&mut instances, last, first, color);
+            }
+        } else {
+            let left = area.region.x * surface_size.0 as f32;
+            let top = area.region.y * surface_size.1 as f32;
+            let right = (area.region.x + area.region.width) * surface_size.0 as f32;
+            let bottom = (area.region.y + area.region.height) * surface_size.1 as f32;
+            push_debug_segment(&mut instances, (left, top), (right, top), color);
+            push_debug_segment(&mut instances, (right, top), (right, bottom), color);
+            push_debug_segment(&mut instances, (right, bottom), (left, bottom), color);
+            push_debug_segment(&mut instances, (left, bottom), (left, top), color);
+        }
+    }
+    instances
+}
+
+fn push_debug_segment(
+    instances: &mut Vec<ParticleInstance>,
+    from: (f32, f32),
+    to: (f32, f32),
+    color: [f32; 4],
+) {
+    let dx = to.0 - from.0;
+    let dy = to.1 - from.1;
+    let length = (dx * dx + dy * dy).sqrt().max(1.0);
+    instances.push(ParticleInstance {
+        center_x: (from.0 + to.0) * 0.5,
+        center_y: (from.1 + to.1) * 0.5,
+        size_x: length,
+        size_y: 3.0,
+        angle: dy.atan2(dx),
+        shape: 0.0,
+        color_r: color[0],
+        color_g: color[1],
+        color_b: color[2],
+        color_a: color[3],
+    });
+}
+
 fn sprite_layout(
     canvas_width: u32,
     canvas_height: u32,
@@ -1604,7 +2216,7 @@ fn sprite_layout(
     let source_aspect = scaled_source_width as f32 / scaled_source_height as f32;
     let canvas_aspect = canvas_width as f32 / canvas_height as f32;
 
-    let (target_width, target_height) = match fit {
+    let (base_width, base_height) = match fit {
         ImageFitMode::Contain => {
             if source_aspect > canvas_aspect {
                 (
@@ -1633,6 +2245,13 @@ fn sprite_layout(
                 )
             }
         }
+    };
+    let (target_width, target_height) = match fit {
+        ImageFitMode::Center => (base_width, base_height),
+        _ => (
+            ((base_width as f32) * scale).round().max(1.0) as u32,
+            ((base_height as f32) * scale).round().max(1.0) as u32,
+        ),
     };
 
     let x = ((canvas_width as i64 - target_width as i64) / 2) + offset_x.round() as i64;

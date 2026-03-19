@@ -52,6 +52,7 @@ fn main() -> Result<()> {
         compatibility: CompatibilityInfo::default(),
         import_metadata: None,
         entrypoint: resolved.path.clone(),
+        asset_path: None,
     };
 
     let detail = renderer

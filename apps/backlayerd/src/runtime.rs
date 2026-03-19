@@ -527,7 +527,7 @@ fn bootstrap_worker_session(
             }
             Err(status) => Err(status),
         },
-        RendererBackend::Video => match start_video_process_session(spec) {
+        RendererBackend::Video => match start_video_process_session(spec, pause) {
             Ok(child) => {
                 let status = RendererSessionStatus::Ready {
                     output_name: spec.output_name.clone(),
@@ -557,7 +557,7 @@ fn bootstrap_worker_session(
             }
             Err(status) => Err(status),
         },
-        RendererBackend::Scene => match start_scene_process_session(spec) {
+        RendererBackend::Scene => match start_scene_process_session(spec, pause) {
             Ok(child) => {
                 let status = RendererSessionStatus::Ready {
                     output_name: spec.output_name.clone(),
@@ -681,19 +681,16 @@ fn shader_process_detail(spec: &RendererLaunchSpec) -> String {
     )
 }
 
-fn start_video_process_session(spec: &RendererLaunchSpec) -> Result<Child, RendererSessionStatus> {
-    let preview_path = spec
-        .asset
-        .preview_image
-        .clone()
-        .filter(|path| path.is_file())
-        .ok_or_else(|| RendererSessionStatus::Unsupported {
-            reason: "video runner preview fallback requires a preview image".into(),
-        })?;
+fn start_video_process_session(
+    spec: &RendererLaunchSpec,
+    pause: &PausePolicy,
+) -> Result<Child, RendererSessionStatus> {
     let args = vec![
         spec.output_name.clone(),
+        pause.fps_limit.max(1).to_string(),
+        if pause.pause_on_fullscreen { "1" } else { "0" }.to_string(),
+        if pause.pause_on_battery { "1" } else { "0" }.to_string(),
         spec.asset.id.clone(),
-        preview_path.display().to_string(),
         spec.asset.entrypoint.display().to_string(),
     ];
 
@@ -716,9 +713,15 @@ fn start_web_process_session(spec: &RendererLaunchSpec) -> Result<Child, Rendere
     start_runner_process("web-runner", &args)
 }
 
-fn start_scene_process_session(spec: &RendererLaunchSpec) -> Result<Child, RendererSessionStatus> {
+fn start_scene_process_session(
+    spec: &RendererLaunchSpec,
+    pause: &PausePolicy,
+) -> Result<Child, RendererSessionStatus> {
     let args = vec![
         spec.output_name.clone(),
+        pause.fps_limit.max(1).to_string(),
+        if pause.pause_on_fullscreen { "1" } else { "0" }.to_string(),
+        if pause.pause_on_battery { "1" } else { "0" }.to_string(),
         spec.asset.id.clone(),
         spec.asset
             .preview_image
@@ -791,17 +794,10 @@ fn start_runner_process(
 }
 
 fn video_process_detail(spec: &RendererLaunchSpec) -> String {
-    match spec.asset.preview_image.as_ref() {
-        Some(preview) => format!(
-            "video runner process started in preview fallback mode for {} using {}",
-            spec.asset.id,
-            preview.display()
-        ),
-        None => format!(
-            "video runner process started in preview fallback mode for {}",
-            spec.asset.id
-        ),
-    }
+    format!(
+        "video runner process started with ffmpeg decode playback for {}",
+        spec.asset.id
+    )
 }
 
 fn web_process_detail(spec: &RendererLaunchSpec) -> String {
@@ -1199,7 +1195,7 @@ fn restart_live_session(
             }
         }
         RendererBackend::Video => {
-            let child = start_video_process_session(spec)?;
+            let child = start_video_process_session(spec, pause)?;
             let status = RendererSessionStatus::Ready {
                 output_name: spec.output_name.clone(),
                 configured: true,
@@ -1233,7 +1229,7 @@ fn restart_live_session(
             }
         }
         RendererBackend::Scene => {
-            let child = start_scene_process_session(spec)?;
+            let child = start_scene_process_session(spec, pause)?;
             let status = RendererSessionStatus::Ready {
                 output_name: spec.output_name.clone(),
                 configured: true,
@@ -1408,6 +1404,7 @@ mod tests {
                 compatibility: CompatibilityInfo::default(),
                 import_metadata: None,
                 entrypoint: PathBuf::from("wallpaper.mp4"),
+                asset_path: None,
             },
             backend: RendererBackend::Video,
         };
@@ -1451,6 +1448,7 @@ mod tests {
                     compatibility: CompatibilityInfo::default(),
                     import_metadata: None,
                     entrypoint: PathBuf::from("assets/demo.neon-grid/shaders/neon-grid.wgsl"),
+                    asset_path: None,
                 },
                 settings: AssignmentSettings::default(),
             }],

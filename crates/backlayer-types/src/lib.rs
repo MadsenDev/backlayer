@@ -20,6 +20,8 @@ pub struct AssetMetadata {
     #[serde(default)]
     pub import_metadata: Option<ImportMetadata>,
     pub entrypoint: PathBuf,
+    #[serde(default)]
+    pub asset_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -202,6 +204,44 @@ pub struct SceneColorStop {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SceneNormalizedRect {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SceneNormalizedPoint {
+    pub x: f32,
+    pub y: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SceneParticleAreaShape {
+    Rect,
+    Polygon,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SceneParticleAreaNode {
+    pub id: String,
+    pub name: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub shape: Option<SceneParticleAreaShape>,
+    pub region: SceneNormalizedRect,
+    #[serde(default)]
+    pub points: Vec<SceneNormalizedPoint>,
+    #[serde(default)]
+    pub occluder: bool,
+    #[serde(default)]
+    pub surface: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SceneEmitterNode {
     pub id: String,
     pub name: String,
@@ -261,6 +301,8 @@ pub struct SceneEmitterNode {
     #[serde(default)]
     pub particle_image_key: Option<String>,
     #[serde(default)]
+    pub particle_rotation_deg: Option<f32>,
+    #[serde(default)]
     pub size_curve: Vec<SceneCurvePoint>,
     #[serde(default)]
     pub alpha_curve: Vec<SceneCurvePoint>,
@@ -290,6 +332,12 @@ pub struct SceneSpriteNode {
     #[serde(default = "default_one")]
     pub opacity: f32,
     #[serde(default)]
+    pub particle_occluder: bool,
+    #[serde(default)]
+    pub particle_surface: bool,
+    #[serde(default)]
+    pub particle_region: Option<SceneNormalizedRect>,
+    #[serde(default)]
     pub behaviors: Vec<SceneBehavior>,
 }
 
@@ -299,6 +347,7 @@ pub enum SceneNode {
     Sprite(SceneSpriteNode),
     Effect(SceneEffectNode),
     Emitter(SceneEmitterNode),
+    ParticleArea(SceneParticleAreaNode),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -316,8 +365,11 @@ pub struct NativeSceneDocument {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CreateSceneImageSourceRequest {
     pub key: String,
-    pub data_url: String,
     pub filename: String,
+    #[serde(default)]
+    pub data_url: Option<String>,
+    #[serde(default)]
+    pub existing_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -332,16 +384,30 @@ pub struct CreateSceneAssetRequest {
     #[serde(default)]
     pub base_image_filename: Option<String>,
     #[serde(default)]
+    pub base_image_path: Option<PathBuf>,
+    #[serde(default)]
     pub extra_images: Vec<CreateSceneImageSourceRequest>,
     #[serde(default)]
     pub nodes: Vec<SceneNode>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct EditableSceneImage {
-    pub key: String,
+pub struct CreateNativeAssetRequest {
+    pub name: String,
+    pub kind: WallpaperKind,
     pub data_url: String,
     pub filename: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EditableSceneImage {
+    pub key: String,
+    pub filename: String,
+    pub path: PathBuf,
+    #[serde(default)]
+    pub width: Option<u32>,
+    #[serde(default)]
+    pub height: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -485,6 +551,9 @@ pub enum DaemonRequest {
     UpdatePausePolicy {
         pause: PausePolicy,
     },
+    CreateNativeAsset {
+        request: CreateNativeAssetRequest,
+    },
     CreateSceneAsset {
         request: CreateSceneAssetRequest,
     },
@@ -590,6 +659,7 @@ mod tests {
             compatibility: CompatibilityInfo::default(),
             import_metadata: None,
             entrypoint: PathBuf::from("assets/demo.neon-grid/shaders/neon-grid.wgsl"),
+            asset_path: None,
         };
 
         assert!(monitor.matches_assignment(&MonitorAssignment {
@@ -626,6 +696,7 @@ mod tests {
                 original_type: Some("scene".into()),
             }),
             entrypoint: PathBuf::from("scene.pkg"),
+            asset_path: None,
         };
 
         let encoded = toml::to_string(&asset).expect("asset should serialize");

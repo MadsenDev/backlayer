@@ -29,6 +29,7 @@ export type AssetMetadata = {
   compatibility: CompatibilityInfo
   import_metadata?: ImportMetadata | null
   entrypoint: string
+  asset_path?: string | null
 }
 
 export type MonitorAssignment = {
@@ -39,6 +40,13 @@ export type MonitorAssignment = {
 
 export type AssignmentSettings = {
   image_fit?: ImageFitMode | null
+}
+
+export type CreateNativeAssetRequest = {
+  name: string
+  kind: Extract<WallpaperKind, 'image' | 'video' | 'shader'>
+  data_url: string
+  filename: string
 }
 
 export type SceneBlendMode = 'alpha' | 'add' | 'screen' | 'multiply'
@@ -60,6 +68,32 @@ export type SceneImageSource = {
   path: string
 }
 
+export type SceneNormalizedRect = {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+export type SceneNormalizedPoint = {
+  x: number
+  y: number
+}
+
+export type SceneParticleAreaShape = 'rect' | 'polygon'
+
+export type SceneParticleAreaNode = {
+  kind: 'particle_area'
+  id: string
+  name: string
+  enabled: boolean
+  shape?: SceneParticleAreaShape | null
+  region: SceneNormalizedRect
+  points?: SceneNormalizedPoint[]
+  occluder: boolean
+  surface: boolean
+}
+
 export type SceneSpriteNode = {
   kind: 'sprite'
   id: string
@@ -73,6 +107,9 @@ export type SceneSpriteNode = {
   scale: number
   rotation_deg: number
   opacity: number
+  particle_occluder?: boolean | null
+  particle_surface?: boolean | null
+  particle_region?: SceneNormalizedRect | null
   behaviors: SceneBehavior[]
 }
 
@@ -120,6 +157,7 @@ export type SceneEmitterNode = {
   drag: number
   color_hex?: string | null
   particle_image_key?: string | null
+  particle_rotation_deg?: number | null
   size_curve: SceneCurvePoint[]
   alpha_curve: SceneCurvePoint[]
   color_curve: SceneColorStop[]
@@ -129,7 +167,7 @@ export type SceneEmitterShape = 'point' | 'box' | 'line' | 'circle'
 export type SceneCurvePoint = { x: number; y: number }
 export type SceneColorStop = { x: number; color_hex: string }
 
-export type SceneNode = SceneSpriteNode | SceneEffectNode | SceneEmitterNode
+export type SceneNode = SceneSpriteNode | SceneEffectNode | SceneEmitterNode | SceneParticleAreaNode
 
 export type NativeSceneDocument = {
   schema: string
@@ -142,8 +180,9 @@ export type NativeSceneDocument = {
 
 export type CreateSceneImageSourceRequest = {
   key: string
-  data_url: string
   filename: string
+  data_url?: string | null
+  existing_path?: string | null
 }
 
 export type CreateSceneAssetRequest = {
@@ -152,14 +191,17 @@ export type CreateSceneAssetRequest = {
   base_asset_id?: string | null
   base_image_data_url?: string | null
   base_image_filename?: string | null
+  base_image_path?: string | null
   extra_images: CreateSceneImageSourceRequest[]
   nodes: SceneNode[]
 }
 
 export type EditableSceneImage = {
   key: string
-  data_url: string
   filename: string
+  path: string
+  width?: number | null
+  height?: number | null
 }
 
 export type EditableSceneAsset = {

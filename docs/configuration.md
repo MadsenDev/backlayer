@@ -37,13 +37,16 @@ path = "~/.config/backlayer/backlayer.sock"
 - `animated` currently matters for shader assets. Set it to `true` when the WGSL source expects the built-in uniform block exposed by Backlayer.
 - `image_fit` currently matters for image assets. Supported values are `cover`, `contain`, `stretch`, and `center`.
 - `entrypoint` is the asset-relative runtime target, such as a shader file or media file.
+- Native Backlayer wallpapers can now be stored as single-file `.backlayer` packages.
+- Backlayer treats `.backlayer` as the primary native asset format and extracts package contents into an internal cache for runtime/editor compatibility.
 - `source_kind` distinguishes native Backlayer assets from imported Wallpaper Engine items.
 - `compatibility.status` is one of `supported`, `partial`, or `unsupported`, and `compatibility.warnings` explains known fidelity gaps.
 - Imported Wallpaper Engine items may also include `preview_image` and `import_metadata` describing the original local source path, workshop id, and source manifest.
 - Native scene assets created inside Backlayer are stored under `~/.config/backlayer/assets` and discovered alongside repo-local demo assets.
+- The manager can also create managed native `image`, `video`, and `shader` assets from local files, and those are stored under `~/.config/backlayer/assets` too.
 - `ipc` currently assumes a Unix domain socket for UI-to-daemon communication.
 - The daemon can still match legacy output-name assignments as a fallback, but new config should use `monitor_id`.
-- The repo currently includes `demo.neon-grid` and `demo.ember-scan` for static shaders, `demo.tide-pulse` for an animated shader, and `demo.sunset-stripes` for the image path.
+- The repo currently includes `demo.neon-grid` and `demo.ember-scan` for static shaders, `demo.tide-pulse` for an animated shader, `demo.sunset-stripes` for the image path, and `demo.prism-loop` for the native video path.
 - The repo currently uses `demo.sunset-stripes` as the single image demo; image fit is now configured per assignment from the UI instead of through duplicate demo assets.
 - The manager can now create native `scene` assets through the Scene Composer UI. Scene Composer can start from either an existing image wallpaper in the library or a picked local image file.
 - Native scene assets created inside Backlayer can also be reopened and edited in the Scene Composer.
@@ -67,7 +70,7 @@ path = "~/.config/backlayer/backlayer.sock"
 - `scene-runner` also supports a first layered subset for `scene.json`: multiple local image layers can be composited in order using simple `x`, `y`, `width`, `height`, `scale`, and `opacity` fields.
 - For common `scene.pkg` bundles, `scene-runner` can now extract the packaged `scene.json`, resolve simple model/material/texture chains, decode embedded PNG/JPEG/GIF/WebP payloads and common BC1/DXT1-style packaged `.tex` textures, and composite those layers into a static scene result.
 - `web-runner` currently supports a narrow local HTML subset: it can render the first local `<img src=...>` or `background-image:url(...)` it finds, or a parsed hex `background` / `background-color`, before falling back to the imported preview image.
-- The Settings modal surfaces the current video runtime dependency state so you can see whether Backlayer is limited to preview fallback because `mpv`/`libmpv` is unavailable or because playback integration is still unfinished.
+- The Settings modal surfaces the current video runtime dependency state so you can see whether first-pass `ffmpeg` / `ffprobe` playback is available, while `libmpv` and hardware-accelerated playback remain future work.
 - When an imported item includes a preview image, the Tauri manager uses that real local preview in the asset browser instead of a synthetic placeholder.
 - Animated shader assets should declare a WGSL uniform block matching:
 ```wgsl

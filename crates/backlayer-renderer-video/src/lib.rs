@@ -18,6 +18,7 @@ pub struct VideoRenderer;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VideoRuntimeSupport {
+    pub ffmpeg_tools_found: bool,
     pub mpv_binary_found: bool,
     pub libmpv_found: bool,
 }
@@ -55,6 +56,8 @@ impl VideoRenderer {
 
     pub fn probe_runtime_support(&self) -> VideoRuntimeSupport {
         VideoRuntimeSupport {
+            ffmpeg_tools_found: command_succeeds("which", &["ffmpeg"])
+                && command_succeeds("which", &["ffprobe"]),
             mpv_binary_found: command_succeeds("which", &["mpv"]),
             libmpv_found: command_succeeds("pkg-config", &["--exists", "mpv"]),
         }
@@ -62,28 +65,32 @@ impl VideoRenderer {
 
     pub fn dependency_status(&self) -> RendererDependencyStatus {
         let support = self.probe_runtime_support();
-        let detail = match (support.mpv_binary_found, support.libmpv_found) {
-            (true, true) => {
-                "mpv and libmpv were detected, but Backlayer is still using preview-fallback mode until libmpv playback is integrated"
+        let detail = match (
+            support.ffmpeg_tools_found,
+            support.mpv_binary_found,
+            support.libmpv_found,
+        ) {
+            (true, true, true) => {
+                "ffmpeg and ffprobe were detected, along with mpv and libmpv. Backlayer can use first-pass FFmpeg CLI playback now, while libmpv integration remains future work."
                     .to_string()
             }
-            (true, false) => {
-                "mpv binary detected, but libmpv development files were not found; Backlayer is using preview-fallback mode".to_string()
+            (true, _, _) => {
+                "ffmpeg and ffprobe were detected. Backlayer can use first-pass FFmpeg CLI playback, but libmpv integration is still pending.".to_string()
             }
-            (false, true) => {
-                "libmpv was detected, but the mpv binary was not found; Backlayer is using preview-fallback mode".to_string()
+            (false, true, true) => {
+                "mpv and libmpv were detected, but ffmpeg and ffprobe were not found for Backlayer's current playback path.".to_string()
             }
-            (false, false) => {
-                "mpv and libmpv were not detected; imported videos are limited to preview-fallback mode".to_string()
+            (false, _, _) => {
+                "ffmpeg and ffprobe were not detected; video wallpapers are unavailable on this build path.".to_string()
             }
         };
 
         RendererDependencyStatus {
-            available: support.mpv_binary_found && support.libmpv_found,
-            mode: Some(if support.mpv_binary_found && support.libmpv_found {
-                "preview_fallback_pending_integration".into()
+            available: support.ffmpeg_tools_found,
+            mode: Some(if support.ffmpeg_tools_found {
+                "ffmpeg_decode".into()
             } else {
-                "preview_fallback".into()
+                "missing_video_runtime".into()
             }),
             detail: Some(detail),
         }
@@ -105,7 +112,7 @@ mod tests {
     use super::VideoRenderer;
 
     #[test]
-    fn dependency_status_always_reports_preview_mode_until_playback_exists() {
+    fn dependency_status_reports_video_runtime_mode() {
         let status = VideoRenderer::default().dependency_status();
 
         assert!(status.mode.is_some());

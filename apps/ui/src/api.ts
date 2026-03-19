@@ -1,4 +1,4 @@
-import type { AssetMetadata, AssignmentSettings, CreateSceneAssetRequest, DaemonState, EditableSceneAsset, FeatureFlags, RuntimeSnapshot } from './types'
+import type { AssetMetadata, AssignmentSettings, CreateNativeAssetRequest, CreateSceneAssetRequest, DaemonState, EditableSceneAsset, FeatureFlags, RuntimeSnapshot } from './types'
 import type { PausePolicy } from './types'
 
 const emptyState: DaemonState = {
@@ -60,6 +60,7 @@ const mockAssets: AssetMetadata[] = [
     },
     import_metadata: null,
     entrypoint: 'shaders/neon-grid.wgsl',
+    asset_path: null,
   },
 ]
 
@@ -67,20 +68,28 @@ const defaultFeatureFlags: FeatureFlags = {
   workshop_enabled: false,
 }
 
-export async function fetchRuntimeSnapshot(): Promise<RuntimeSnapshot> {
+const previewDataUrlCache = new Map<string, Promise<string | null>>()
+
+export async function fetchRuntimeSnapshot(
+  options: { includeAssets?: boolean } = {},
+): Promise<RuntimeSnapshot> {
+  const { includeAssets = true } = options
+
   try {
     const { invoke } = await import('@tauri-apps/api/core')
     try {
       const [featureFlags, state, assets] = await Promise.all([
         invoke<FeatureFlags>('daemon_feature_flags'),
         invoke<DaemonState>('daemon_get_state'),
-        invoke<AssetMetadata[]>('daemon_list_assets'),
+        includeAssets
+          ? invoke<AssetMetadata[]>('daemon_list_assets')
+          : Promise.resolve<AssetMetadata[]>(mockAssets),
       ])
 
       return {
         featureFlags,
         state,
-        assets,
+        assets: includeAssets ? assets : [],
         source: 'tauri',
       }
     } catch (error) {
@@ -169,6 +178,13 @@ export async function createSceneAsset(request: CreateSceneAssetRequest): Promis
   })
 }
 
+export async function createNativeAsset(request: CreateNativeAssetRequest): Promise<AssetMetadata> {
+  const { invoke } = await import('@tauri-apps/api/core')
+  return await invoke<AssetMetadata>('daemon_create_native_asset', {
+    request,
+  })
+}
+
 export async function loadEditableSceneAsset(assetId: string): Promise<EditableSceneAsset> {
   const { invoke } = await import('@tauri-apps/api/core')
   return await invoke<EditableSceneAsset>('daemon_load_editable_scene_asset', {
@@ -177,12 +193,22 @@ export async function loadEditableSceneAsset(assetId: string): Promise<EditableS
 }
 
 export async function loadAssetPreviewDataUrl(path: string): Promise<string | null> {
-  try {
-    const { invoke } = await import('@tauri-apps/api/core')
-    return await invoke<string>('asset_preview_data_url', {
-      path,
-    })
-  } catch {
-    return null
+  const cached = previewDataUrlCache.get(path)
+  if (cached) {
+    return await cached
   }
+
+  const request = (async () => {
+    try {
+      const { invoke } = await import('@tauri-apps/api/core')
+      return await invoke<string>('asset_preview_data_url', {
+        path,
+      })
+    } catch {
+      return null
+    }
+  })()
+
+  previewDataUrlCache.set(path, request)
+  return await request
 }

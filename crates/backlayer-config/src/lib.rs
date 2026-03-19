@@ -1,22 +1,26 @@
 use std::{
     env, fs,
     hash::{Hash, Hasher},
+    io::{Seek, Write},
     path::{Path, PathBuf},
+    time::UNIX_EPOCH,
 };
 
 use backlayer_types::{
     AssetMetadata, AssetSourceKind, AssignmentSettings, BacklayerConfig, CompatibilityInfo,
-    CompatibilityStatus, CreateSceneAssetRequest, CreateSceneImageSourceRequest,
-    EditableSceneAsset, EditableSceneImage, ImportMetadata, ImportSourceApp, IpcTransport,
-    MonitorAssignment, NativeSceneDocument, PausePolicy, SceneBehavior, SceneBlendMode,
-    SceneColorStop, SceneCurvePoint, SceneEffectKind, SceneEffectNode, SceneEmitterNode,
-    SceneEmitterPreset, SceneEmitterShape, SceneImageSource, SceneNode, SceneSpriteNode,
-    WallpaperKind,
+    CompatibilityStatus, CreateNativeAssetRequest, CreateSceneAssetRequest,
+    CreateSceneImageSourceRequest, EditableSceneAsset, EditableSceneImage, ImportMetadata,
+    ImportSourceApp, IpcTransport, MonitorAssignment, NativeSceneDocument, PausePolicy,
+    SceneBehavior, SceneBlendMode, SceneColorStop, SceneCurvePoint, SceneEffectKind,
+    SceneEffectNode, SceneEmitterNode, SceneEmitterPreset, SceneEmitterShape, SceneImageSource,
+    SceneNode, SceneNormalizedPoint, SceneNormalizedRect, SceneParticleAreaNode,
+    SceneParticleAreaShape, SceneSpriteNode, WallpaperKind,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use image::{DynamicImage, Rgba, RgbaImage, imageops};
 use serde::Deserialize;
 use thiserror::Error;
+use zip::{ZipArchive, ZipWriter, write::FileOptions};
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -69,6 +73,10 @@ impl ConfigStore {
 
     pub fn default_user_assets_path(&self) -> PathBuf {
         PathBuf::from("~/.config/backlayer/assets")
+    }
+
+    pub fn default_package_cache_path(&self) -> PathBuf {
+        PathBuf::from("~/.config/backlayer/cache/packages")
     }
 
     pub fn default_workshop_imports_path(&self) -> PathBuf {
@@ -145,6 +153,7 @@ impl ConfigStore {
             compatibility: CompatibilityInfo::default(),
             import_metadata: None,
             entrypoint: "assets/demo.neon-grid/shaders/neon-grid.wgsl".into(),
+            asset_path: None,
         }
     }
 
@@ -174,25 +183,7 @@ impl ConfigStore {
         &self,
         path: impl AsRef<Path>,
     ) -> Result<AssetMetadata, ConfigError> {
-        let path = path.as_ref();
-        let raw = fs::read_to_string(path)?;
-        let mut asset: AssetMetadata = toml::from_str(&raw).map_err(ConfigError::from)?;
-
-        if asset.entrypoint.is_relative() {
-            if let Some(parent) = path.parent() {
-                asset.entrypoint = parent.join(&asset.entrypoint);
-            }
-        }
-
-        if let Some(preview_image) = asset.preview_image.clone() {
-            if preview_image.is_relative() {
-                if let Some(parent) = path.parent() {
-                    asset.preview_image = Some(parent.join(preview_image));
-                }
-            }
-        }
-
-        Ok(asset)
+        self.load_asset_metadata_from_manifest(path.as_ref(), None)
     }
 
     pub fn discover_assets(
@@ -208,13 +199,23 @@ impl ConfigStore {
 
         for entry in fs::read_dir(root)? {
             let entry = entry?;
-            if !entry.file_type()?.is_dir() {
+            if entry.file_type()?.is_dir() {
+                let metadata_path = entry.path().join("backlayer.toml");
+                if metadata_path.is_file() {
+                    assets.push(self.load_asset_metadata_from_manifest(
+                        &metadata_path,
+                        Some(entry.path()),
+                    )?);
+                }
                 continue;
             }
-
-            let metadata_path = entry.path().join("backlayer.toml");
-            if metadata_path.is_file() {
-                assets.push(self.load_asset_metadata(metadata_path)?);
+            if entry
+                .path()
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("backlayer"))
+            {
+                assets.push(self.load_packaged_asset_metadata(entry.path())?);
             }
         }
 
@@ -230,6 +231,82 @@ impl ConfigStore {
         }
         assets.sort_by(|left, right| left.id.cmp(&right.id));
         Ok(assets)
+    }
+
+    fn load_asset_metadata_from_manifest(
+        &self,
+        manifest_path: &Path,
+        asset_path: Option<PathBuf>,
+    ) -> Result<AssetMetadata, ConfigError> {
+        let raw = fs::read_to_string(manifest_path)?;
+        let mut asset: AssetMetadata = toml::from_str(&raw).map_err(ConfigError::from)?;
+        let asset_root = manifest_path.parent().unwrap_or_else(|| Path::new("."));
+
+        if asset.entrypoint.is_relative() {
+            asset.entrypoint = asset_root.join(&asset.entrypoint);
+        }
+
+        if let Some(preview_image) = asset.preview_image.clone() {
+            if preview_image.is_relative() {
+                asset.preview_image = Some(asset_root.join(preview_image));
+            }
+        }
+
+        asset.asset_path = asset_path;
+        Ok(asset)
+    }
+
+    fn load_packaged_asset_metadata(
+        &self,
+        package_path: impl AsRef<Path>,
+    ) -> Result<AssetMetadata, ConfigError> {
+        let package_path = self.resolve_path(package_path)?;
+        let extracted_root = self.extract_package_to_cache(&package_path)?;
+        let mut asset = self.load_asset_metadata_from_manifest(
+            &extracted_root.join("backlayer.toml"),
+            Some(package_path),
+        )?;
+        asset.asset_path = Some(self.resolve_path(asset.asset_path.unwrap())?);
+        Ok(asset)
+    }
+
+    fn extract_package_to_cache(&self, package_path: &Path) -> Result<PathBuf, ConfigError> {
+        let cache_root = self.resolve_path(self.default_package_cache_path())?;
+        fs::create_dir_all(&cache_root)?;
+        let extract_root = cache_root.join(package_cache_key(package_path)?);
+        let manifest_path = extract_root.join("backlayer.toml");
+        if manifest_path.is_file() {
+            return Ok(extract_root);
+        }
+
+        if extract_root.exists() {
+            fs::remove_dir_all(&extract_root)?;
+        }
+        fs::create_dir_all(&extract_root)?;
+
+        let file = fs::File::open(package_path)?;
+        let mut archive =
+            ZipArchive::new(file).map_err(|error| ConfigError::UnsupportedImportPath(error.to_string()))?;
+        for index in 0..archive.len() {
+            let mut entry = archive
+                .by_index(index)
+                .map_err(|error| ConfigError::UnsupportedImportPath(error.to_string()))?;
+            let Some(relative_path) = entry.enclosed_name().map(Path::to_path_buf) else {
+                continue;
+            };
+            let destination = extract_root.join(relative_path);
+            if entry.is_dir() {
+                fs::create_dir_all(&destination)?;
+                continue;
+            }
+            if let Some(parent) = destination.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let mut target = fs::File::create(&destination)?;
+            std::io::copy(&mut entry, &mut target)?;
+        }
+
+        Ok(extract_root)
     }
 
     pub fn import_wallpaper_engine_path(
@@ -337,25 +414,32 @@ impl ConfigStore {
                 .to_string();
 
             (base_image, base_ext)
+        } else if let Some(path) = request.base_image_path.as_deref() {
+            let base_image = image::open(path).map_err(|error| {
+                ConfigError::UnsupportedImportPath(format!(
+                    "failed to load base image {}: {error}",
+                    path.display()
+                ))
+            })?;
+            let base_ext = path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .unwrap_or("png")
+                .to_string();
+
+            (base_image, base_ext)
         } else if let Some(data_url) = request.base_image_data_url.as_deref() {
             decode_data_url_image(data_url, request.base_image_filename.as_deref())?
         } else {
             return Err(ConfigError::UnsupportedImportPath(
-                "scene composer requires either base_asset_id or base_image_data_url".into(),
+                "scene composer requires a base asset, base image path, or base image data URL"
+                    .into(),
             ));
         };
 
+        let user_assets_root = self.resolve_path(self.default_user_assets_path())?;
         let scene_id = if let Some(existing_asset_id) = request.existing_asset_id.as_deref() {
-            let existing_root = self
-                .resolve_path(self.default_user_assets_path())?
-                .join(existing_asset_id);
-            let existing_metadata_path = existing_root.join("backlayer.toml");
-            if !existing_metadata_path.is_file() {
-                return Err(ConfigError::UnsupportedImportPath(format!(
-                    "cannot edit missing native scene asset: {existing_asset_id}"
-                )));
-            }
-            let existing_asset = self.load_asset_metadata(&existing_metadata_path)?;
+            let existing_asset = self.load_editable_scene_asset(existing_asset_id)?.asset;
             if existing_asset.kind != WallpaperKind::Scene
                 || existing_asset.source_kind != AssetSourceKind::Native
             {
@@ -363,14 +447,14 @@ impl ConfigStore {
                     "asset is not an editable native scene: {existing_asset_id}"
                 )));
             }
-            let _ = fs::remove_dir_all(&existing_root);
+            remove_path_if_exists(&user_assets_root.join(existing_asset_id))?;
+            remove_path_if_exists(&user_assets_root.join(format!("{existing_asset_id}.backlayer")))?;
             existing_asset_id.to_string()
         } else {
             self.allocate_scene_id(&request.name)?
         };
-        let scene_root = self
-            .resolve_path(self.default_user_assets_path())?
-            .join(&scene_id);
+        let package_path = user_assets_root.join(format!("{scene_id}.backlayer"));
+        let scene_root = build_root_for(&scene_id, "scene");
         fs::create_dir_all(scene_root.join("images"))?;
 
         let base_target = scene_root.join("images").join(format!("base.{base_ext}"));
@@ -409,6 +493,9 @@ impl ConfigStore {
                     scale: 1.0,
                     rotation_deg: 0.0,
                     opacity: 1.0,
+                    particle_occluder: false,
+                    particle_surface: false,
+                    particle_region: None,
                     behaviors: Vec::new(),
                 })]
             } else {
@@ -443,6 +530,7 @@ impl ConfigStore {
             },
             import_metadata: None,
             entrypoint: PathBuf::from("scene.json"),
+            asset_path: None,
         };
 
         fs::write(
@@ -450,22 +538,112 @@ impl ConfigStore {
             toml::to_string_pretty(&metadata)?,
         )?;
 
-        self.load_asset_metadata(scene_root.join("backlayer.toml"))
+        write_package_from_directory(&scene_root, &package_path)?;
+        let _ = fs::remove_dir_all(&scene_root);
+        self.load_packaged_asset_metadata(package_path)
+    }
+
+    pub fn create_native_file_asset(
+        &self,
+        request: &CreateNativeAssetRequest,
+    ) -> Result<AssetMetadata, ConfigError> {
+        if matches!(request.kind, WallpaperKind::Scene | WallpaperKind::Web) {
+            return Err(ConfigError::UnsupportedImportPath(format!(
+                "native asset creation does not support {:?}",
+                request.kind
+            )));
+        }
+
+        let (bytes, extension) = decode_data_url_bytes(&request.data_url, Some(&request.filename))?;
+        let asset_id = self.allocate_native_asset_id(&request.name, &request.kind)?;
+        let user_assets_root = self.resolve_path(self.default_user_assets_path())?;
+        let package_path = user_assets_root.join(format!("{asset_id}.backlayer"));
+        let asset_root = build_root_for(&asset_id, "asset");
+        let media_dir = asset_root.join("files");
+        fs::create_dir_all(&media_dir)?;
+
+        let entrypoint = media_dir.join(format!("source.{extension}"));
+        fs::write(&entrypoint, bytes)?;
+
+        let preview_image = match request.kind {
+            WallpaperKind::Video => generate_video_preview(&entrypoint, &asset_root)
+                .ok()
+                .flatten(),
+            WallpaperKind::Image => None,
+            WallpaperKind::Shader => None,
+            WallpaperKind::Scene | WallpaperKind::Web => None,
+        };
+
+        let metadata = AssetMetadata {
+            id: asset_id.clone(),
+            name: request.name.trim().to_string(),
+            kind: request.kind.clone(),
+            animated: matches!(request.kind, WallpaperKind::Video),
+            image_fit: matches!(request.kind, WallpaperKind::Image)
+                .then_some(backlayer_types::ImageFitMode::Cover),
+            source_kind: AssetSourceKind::Native,
+            preview_image,
+            compatibility: CompatibilityInfo {
+                status: CompatibilityStatus::Supported,
+                warnings: Vec::new(),
+            },
+            import_metadata: None,
+            entrypoint: relative_path(&asset_root, &entrypoint),
+            asset_path: None,
+        };
+
+        fs::write(
+            asset_root.join("backlayer.toml"),
+            toml::to_string_pretty(&metadata)?,
+        )?;
+
+        write_package_from_directory(&asset_root, &package_path)?;
+        let _ = fs::remove_dir_all(&asset_root);
+        self.load_packaged_asset_metadata(package_path)
     }
 
     pub fn load_editable_scene_asset(
         &self,
         asset_id: &str,
     ) -> Result<EditableSceneAsset, ConfigError> {
-        let asset_root = self.resolve_path(self.default_user_assets_path())?.join(asset_id);
-        let metadata = self.load_asset_metadata(asset_root.join("backlayer.toml"))?;
-        if metadata.kind != WallpaperKind::Scene || metadata.source_kind != AssetSourceKind::Native {
+        let asset_root = self
+            .find_native_asset_container(asset_id)?
+            .ok_or_else(|| {
+                ConfigError::UnsupportedImportPath(format!(
+                    "cannot edit missing native scene asset: {asset_id}"
+                ))
+            })?;
+        let metadata = if asset_root
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("backlayer"))
+        {
+            self.load_packaged_asset_metadata(&asset_root)?
+        } else {
+            self.load_asset_metadata_from_manifest(&asset_root.join("backlayer.toml"), Some(asset_root.clone()))?
+        };
+        if metadata.kind != WallpaperKind::Scene || metadata.source_kind != AssetSourceKind::Native
+        {
             return Err(ConfigError::UnsupportedImportPath(format!(
                 "asset is not an editable native scene: {asset_id}"
             )));
         }
 
-        let scene_path = asset_root.join(&metadata.entrypoint);
+        let extracted_root = if asset_root
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("backlayer"))
+        {
+            self.extract_package_to_cache(&asset_root)?
+        } else {
+            asset_root.clone()
+        };
+        let scene_path = extracted_root.join(
+            metadata
+                .entrypoint
+                .strip_prefix(&extracted_root)
+                .unwrap_or(&metadata.entrypoint),
+        );
         let document: NativeSceneDocument =
             serde_json::from_slice(&fs::read(&scene_path).map_err(ConfigError::Read)?)?;
         if document.schema != "backlayer_scene_v2" {
@@ -478,15 +656,18 @@ impl ConfigStore {
             .images
             .iter()
             .map(|image| {
-                let path = asset_root.join(&image.path);
+                let path = extracted_root.join(&image.path);
+                let dimensions = image::image_dimensions(&path).ok();
                 Ok(EditableSceneImage {
                     key: image.key.clone(),
-                    data_url: encode_image_file_as_data_url(&path)?,
                     filename: path
                         .file_name()
                         .and_then(|name| name.to_str())
                         .unwrap_or("image.png")
                         .to_string(),
+                    path,
+                    width: dimensions.map(|(width, _)| width),
+                    height: dimensions.map(|(_, height)| height),
                 })
             })
             .collect::<Result<Vec<_>, ConfigError>>()?;
@@ -503,21 +684,51 @@ impl ConfigStore {
         scene_root: &Path,
         source: &CreateSceneImageSourceRequest,
     ) -> Result<SceneImageSource, ConfigError> {
-        let (image, extension) = decode_data_url_image(&source.data_url, Some(&source.filename))?;
         let key = sanitize_component(&source.key);
-        let file_name = format!("{key}.{extension}");
-        let target = scene_root.join("images").join(&file_name);
-        image.save(&target).map_err(|error| {
-            ConfigError::UnsupportedImportPath(format!(
-                "failed to save scene source image {}: {error}",
-                target.display()
-            ))
-        })?;
+        let target = if let Some(path) = source.existing_path.as_deref() {
+            self.copy_existing_scene_image_source(scene_root, &key, path)?
+        } else if let Some(data_url) = source.data_url.as_deref() {
+            let (image, extension) = decode_data_url_image(data_url, Some(&source.filename))?;
+            let file_name = format!("{key}.{extension}");
+            let target = scene_root.join("images").join(&file_name);
+            image.save(&target).map_err(|error| {
+                ConfigError::UnsupportedImportPath(format!(
+                    "failed to save scene source image {}: {error}",
+                    target.display()
+                ))
+            })?;
+            target
+        } else {
+            return Err(ConfigError::UnsupportedImportPath(format!(
+                "scene image source {key} is missing both data_url and existing_path"
+            )));
+        };
 
         Ok(SceneImageSource {
             key,
-            path: PathBuf::from(format!("images/{file_name}")),
+            path: relative_path(scene_root, &target),
         })
+    }
+
+    fn copy_existing_scene_image_source(
+        &self,
+        scene_root: &Path,
+        key: &str,
+        path: &Path,
+    ) -> Result<PathBuf, ConfigError> {
+        let extension = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or("png");
+        let file_name = format!("{key}.{extension}");
+        let target = scene_root.join("images").join(&file_name);
+        fs::copy(path, &target).map_err(|error| {
+            ConfigError::UnsupportedImportPath(format!(
+                "failed to copy scene source image {}: {error}",
+                path.display()
+            ))
+        })?;
+        Ok(target)
     }
 
     fn allocate_scene_id(&self, name: &str) -> Result<String, ConfigError> {
@@ -525,6 +736,44 @@ impl ConfigStore {
         fs::create_dir_all(&root)?;
         let base = slugify_name(name);
         let prefix = format!("scene.{base}");
+
+        if !root.join(&prefix).exists() && !root.join(format!("{prefix}.backlayer")).exists() {
+            return Ok(prefix);
+        }
+
+        for index in 2..=999 {
+            let candidate = format!("{prefix}-{index}");
+            if !root.join(&candidate).exists()
+                && !root.join(format!("{candidate}.backlayer")).exists()
+            {
+                return Ok(candidate);
+            }
+        }
+
+        Err(ConfigError::UnsupportedImportPath(format!(
+            "could not allocate scene id for {name}"
+        )))
+    }
+
+    fn allocate_native_asset_id(
+        &self,
+        name: &str,
+        kind: &WallpaperKind,
+    ) -> Result<String, ConfigError> {
+        let root = self.resolve_path(self.default_user_assets_path())?;
+        fs::create_dir_all(&root)?;
+        let base = slugify_name(name);
+        let prefix = format!(
+            "{}.{}",
+            match kind {
+                WallpaperKind::Image => "image",
+                WallpaperKind::Video => "video",
+                WallpaperKind::Shader => "shader",
+                WallpaperKind::Scene => "scene",
+                WallpaperKind::Web => "web",
+            },
+            base
+        );
 
         if !root.join(&prefix).exists() {
             return Ok(prefix);
@@ -538,7 +787,7 @@ impl ConfigStore {
         }
 
         Err(ConfigError::UnsupportedImportPath(format!(
-            "could not allocate scene id for {name}"
+            "could not allocate asset id for {name}"
         )))
     }
 
@@ -579,6 +828,7 @@ impl ConfigStore {
                 original_type: item.original_type.clone(),
             }),
             entrypoint,
+            asset_path: Some(destination.clone()),
         };
 
         let metadata_path = destination.join("backlayer.toml");
@@ -591,9 +841,22 @@ impl ConfigStore {
         asset: &AssetMetadata,
         managed_root: &Path,
     ) -> Result<(), ConfigError> {
+        if let Some(asset_path) = asset.asset_path.as_ref() {
+            let resolved = self.resolve_path(asset_path)?;
+            if resolved.starts_with(managed_root) {
+                remove_path_if_exists(&resolved)?;
+                return Ok(());
+            }
+        }
+
         let candidate = managed_root.join(&asset.id);
         if candidate.exists() {
             fs::remove_dir_all(candidate)?;
+            return Ok(());
+        }
+        let packaged = managed_root.join(format!("{}.backlayer", asset.id));
+        if packaged.exists() {
+            fs::remove_file(packaged)?;
             return Ok(());
         }
 
@@ -616,6 +879,103 @@ impl ConfigStore {
 
         Err(ConfigError::UnsupportedImportPath(asset.id.clone()))
     }
+
+    fn find_native_asset_container(&self, asset_id: &str) -> Result<Option<PathBuf>, ConfigError> {
+        let root = self.resolve_path(self.default_user_assets_path())?;
+        let packaged = root.join(format!("{asset_id}.backlayer"));
+        if packaged.is_file() {
+            return Ok(Some(packaged));
+        }
+
+        let directory = root.join(asset_id);
+        if directory.join("backlayer.toml").is_file() {
+            return Ok(Some(directory));
+        }
+
+        Ok(None)
+    }
+}
+
+fn build_root_for(asset_id: &str, prefix: &str) -> PathBuf {
+    let unique = format!(
+        "{}-{}-{}",
+        prefix,
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    );
+    std::env::temp_dir().join("backlayer-build").join(unique).join(asset_id)
+}
+
+fn remove_path_if_exists(path: &Path) -> Result<(), ConfigError> {
+    if path.is_dir() {
+        fs::remove_dir_all(path)?;
+    } else if path.is_file() {
+        fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
+fn package_cache_key(package_path: &Path) -> Result<String, ConfigError> {
+    let metadata = fs::metadata(package_path)?;
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    package_path.to_string_lossy().hash(&mut hasher);
+    metadata.len().hash(&mut hasher);
+    modified.hash(&mut hasher);
+    Ok(format!("{:016x}", hasher.finish()))
+}
+
+fn write_package_from_directory(root: &Path, package_path: &Path) -> Result<(), ConfigError> {
+    if let Some(parent) = package_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let file = fs::File::create(package_path)?;
+    let mut archive = ZipWriter::new(file);
+    let options = FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    write_directory_to_zip(root, root, &mut archive, options)
+        .map_err(|error| ConfigError::UnsupportedImportPath(error.to_string()))?;
+    archive
+        .finish()
+        .map_err(|error| ConfigError::UnsupportedImportPath(error.to_string()))?;
+    Ok(())
+}
+
+fn write_directory_to_zip<W: Write + Seek>(
+    root: &Path,
+    current: &Path,
+    archive: &mut ZipWriter<W>,
+    options: FileOptions,
+) -> zip::result::ZipResult<()> {
+    for entry in fs::read_dir(current)
+        .map_err(zip::result::ZipError::Io)?
+    {
+        let entry = entry.map_err(zip::result::ZipError::Io)?;
+        let path = entry.path();
+        let relative = path
+            .strip_prefix(root)
+            .expect("path should stay under root")
+            .to_string_lossy()
+            .replace('\\', "/");
+
+        if entry.file_type().map_err(zip::result::ZipError::Io)?.is_dir() {
+            archive.add_directory(format!("{relative}/"), options)?;
+            write_directory_to_zip(root, &path, archive, options)?;
+        } else {
+            archive.start_file(relative, options)?;
+            let mut file = fs::File::open(&path).map_err(zip::result::ZipError::Io)?;
+            std::io::copy(&mut file, archive).map_err(zip::result::ZipError::Io)?;
+        }
+    }
+
+    Ok(())
 }
 
 fn sanitize_scene_nodes(nodes: &[SceneNode], images: &[SceneImageSource]) -> Vec<SceneNode> {
@@ -659,6 +1019,9 @@ fn sanitize_scene_nodes(nodes: &[SceneNode], images: &[SceneImageSource]) -> Vec
                     scale: sprite.scale.clamp(0.05, 4.0),
                     rotation_deg: sprite.rotation_deg.clamp(-180.0, 180.0),
                     opacity: sprite.opacity.clamp(0.0, 1.0),
+                    particle_occluder: sprite.particle_occluder,
+                    particle_surface: sprite.particle_surface,
+                    particle_region: sanitize_scene_rect(sprite.particle_region.as_ref()),
                     behaviors: sanitize_behaviors(&sprite.behaviors),
                 }))
             }
@@ -791,6 +1154,9 @@ fn sanitize_scene_nodes(nodes: &[SceneNode], images: &[SceneImageSource]) -> Vec
                     emitter.particle_image_key.as_deref(),
                     &valid_keys,
                 ),
+                particle_rotation_deg: Some(normalize_degrees(
+                    emitter.particle_rotation_deg.unwrap_or(0.0),
+                )),
                 size_curve: sanitize_scalar_curve(
                     &emitter.size_curve,
                     &default_emitter_size_curve(&emitter.preset),
@@ -804,6 +1170,36 @@ fn sanitize_scene_nodes(nodes: &[SceneNode], images: &[SceneImageSource]) -> Vec
                     &default_emitter_color_curve(&emitter.preset),
                 ),
             })),
+            SceneNode::ParticleArea(area) => {
+                let region = sanitize_scene_rect(Some(&area.region)).unwrap_or(SceneNormalizedRect {
+                    x: 0.25,
+                    y: 0.25,
+                    width: 0.5,
+                    height: 0.25,
+                });
+                sanitized.push(SceneNode::ParticleArea(SceneParticleAreaNode {
+                    id: if area.id.trim().is_empty() {
+                        format!("particle-area-{}", sanitized.len() + 1)
+                    } else {
+                        area.id.trim().to_string()
+                    },
+                    name: if area.name.trim().is_empty() {
+                        "Particle area".into()
+                    } else {
+                        area.name.trim().to_string()
+                    },
+                    enabled: area.enabled,
+                    shape: Some(
+                        area.shape
+                            .clone()
+                            .unwrap_or(SceneParticleAreaShape::Rect),
+                    ),
+                    region,
+                    points: sanitize_scene_points(&area.points),
+                    occluder: area.occluder,
+                    surface: area.surface,
+                }))
+            }
         }
     }
 
@@ -825,6 +1221,9 @@ fn sanitize_scene_nodes(nodes: &[SceneNode], images: &[SceneImageSource]) -> Vec
                 scale: 1.0,
                 rotation_deg: 0.0,
                 opacity: 1.0,
+                particle_occluder: false,
+                particle_surface: false,
+                particle_region: None,
                 behaviors: Vec::new(),
             }),
         );
@@ -843,6 +1242,31 @@ fn sanitize_behaviors(behaviors: &[SceneBehavior]) -> Vec<SceneBehavior> {
             amount_y: behavior.amount_y.clamp(-800.0, 800.0),
             amount: behavior.amount.clamp(-800.0, 800.0),
             phase: behavior.phase,
+        })
+        .collect()
+}
+
+fn sanitize_scene_rect(rect: Option<&SceneNormalizedRect>) -> Option<SceneNormalizedRect> {
+    rect.map(|rect| {
+        let x = rect.x.clamp(0.0, 1.0);
+        let y = rect.y.clamp(0.0, 1.0);
+        let width = rect.width.clamp(0.01, 1.0 - x);
+        let height = rect.height.clamp(0.01, 1.0 - y);
+        SceneNormalizedRect {
+            x,
+            y,
+            width,
+            height,
+        }
+    })
+}
+
+fn sanitize_scene_points(points: &[SceneNormalizedPoint]) -> Vec<SceneNormalizedPoint> {
+    points
+        .iter()
+        .map(|point| SceneNormalizedPoint {
+            x: point.x.clamp(0.0, 1.0),
+            y: point.y.clamp(0.0, 1.0),
         })
         .collect()
 }
@@ -1028,21 +1452,48 @@ fn default_emitter_alpha_curve(preset: &SceneEmitterPreset) -> Vec<SceneCurvePoi
 fn default_emitter_color_curve(preset: &SceneEmitterPreset) -> Vec<SceneColorStop> {
     match preset {
         SceneEmitterPreset::Rain => vec![
-            SceneColorStop { x: 0.0, color_hex: "#e1f1ff".into() },
-            SceneColorStop { x: 1.0, color_hex: "#7bb7ff".into() },
+            SceneColorStop {
+                x: 0.0,
+                color_hex: "#e1f1ff".into(),
+            },
+            SceneColorStop {
+                x: 1.0,
+                color_hex: "#7bb7ff".into(),
+            },
         ],
         SceneEmitterPreset::Snow => vec![
-            SceneColorStop { x: 0.0, color_hex: "#ffffff".into() },
-            SceneColorStop { x: 1.0, color_hex: "#dbe8ff".into() },
+            SceneColorStop {
+                x: 0.0,
+                color_hex: "#ffffff".into(),
+            },
+            SceneColorStop {
+                x: 1.0,
+                color_hex: "#dbe8ff".into(),
+            },
         ],
         SceneEmitterPreset::Dust => vec![
-            SceneColorStop { x: 0.0, color_hex: "#fff1d9".into() },
-            SceneColorStop { x: 1.0, color_hex: "#d5b98e".into() },
+            SceneColorStop {
+                x: 0.0,
+                color_hex: "#fff1d9".into(),
+            },
+            SceneColorStop {
+                x: 1.0,
+                color_hex: "#d5b98e".into(),
+            },
         ],
         SceneEmitterPreset::Embers => vec![
-            SceneColorStop { x: 0.0, color_hex: "#fff1af".into() },
-            SceneColorStop { x: 0.55, color_hex: "#ff8b4a".into() },
-            SceneColorStop { x: 1.0, color_hex: "#72250b".into() },
+            SceneColorStop {
+                x: 0.0,
+                color_hex: "#fff1af".into(),
+            },
+            SceneColorStop {
+                x: 0.55,
+                color_hex: "#ff8b4a".into(),
+            },
+            SceneColorStop {
+                x: 1.0,
+                color_hex: "#72250b".into(),
+            },
         ],
     }
 }
@@ -1069,7 +1520,10 @@ fn sanitize_emitter_color_hex(value: Option<&str>, preset: &SceneEmitterPreset) 
     } else {
         format!("#{value}")
     };
-    if normalized.len() != 7 || !normalized.as_bytes()[1..].iter().all(|byte| byte.is_ascii_hexdigit())
+    if normalized.len() != 7
+        || !normalized.as_bytes()[1..]
+            .iter()
+            .all(|byte| byte.is_ascii_hexdigit())
     {
         return fallback;
     }
@@ -1087,7 +1541,10 @@ fn sanitize_effect_color_hex(value: Option<&str>, effect: &SceneEffectKind) -> S
     } else {
         format!("#{value}")
     };
-    if normalized.len() != 7 || !normalized.as_bytes()[1..].iter().all(|byte| byte.is_ascii_hexdigit())
+    if normalized.len() != 7
+        || !normalized.as_bytes()[1..]
+            .iter()
+            .all(|byte| byte.is_ascii_hexdigit())
     {
         return fallback;
     }
@@ -1120,7 +1577,11 @@ fn sanitize_scalar_curve(
             })
             .collect::<Vec<_>>()
     };
-    points.sort_by(|left, right| left.x.partial_cmp(&right.x).unwrap_or(std::cmp::Ordering::Equal));
+    points.sort_by(|left, right| {
+        left.x
+            .partial_cmp(&right.x)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     points.dedup_by(|left, right| (left.x - right.x).abs() < 0.001);
     if points.is_empty() {
         return fallback.to_vec();
@@ -1136,7 +1597,10 @@ fn sanitize_scalar_curve(
     points
 }
 
-fn sanitize_color_curve(points: &[SceneColorStop], fallback: &[SceneColorStop]) -> Vec<SceneColorStop> {
+fn sanitize_color_curve(
+    points: &[SceneColorStop],
+    fallback: &[SceneColorStop],
+) -> Vec<SceneColorStop> {
     let mut points = if points.is_empty() {
         fallback.to_vec()
     } else {
@@ -1144,22 +1608,38 @@ fn sanitize_color_curve(points: &[SceneColorStop], fallback: &[SceneColorStop]) 
             .iter()
             .map(|point| SceneColorStop {
                 x: point.x.clamp(0.0, 1.0),
-                color_hex: sanitize_effect_color_hex(Some(point.color_hex.as_str()), &SceneEffectKind::Glow),
+                color_hex: sanitize_effect_color_hex(
+                    Some(point.color_hex.as_str()),
+                    &SceneEffectKind::Glow,
+                ),
             })
             .collect::<Vec<_>>()
     };
-    points.sort_by(|left, right| left.x.partial_cmp(&right.x).unwrap_or(std::cmp::Ordering::Equal));
+    points.sort_by(|left, right| {
+        left.x
+            .partial_cmp(&right.x)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     points.dedup_by(|left, right| (left.x - right.x).abs() < 0.001);
     if points.is_empty() {
         return fallback.to_vec();
     }
     if points.first().map(|point| point.x > 0.0).unwrap_or(true) {
         let first = points.first().cloned().unwrap();
-        points.insert(0, SceneColorStop { x: 0.0, color_hex: first.color_hex });
+        points.insert(
+            0,
+            SceneColorStop {
+                x: 0.0,
+                color_hex: first.color_hex,
+            },
+        );
     }
     if points.last().map(|point| point.x < 1.0).unwrap_or(true) {
         let last = points.last().cloned().unwrap();
-        points.push(SceneColorStop { x: 1.0, color_hex: last.color_hex });
+        points.push(SceneColorStop {
+            x: 1.0,
+            color_hex: last.color_hex,
+        });
     }
     points
 }
@@ -1238,7 +1718,7 @@ fn preview_sprite_layout(
     let source_aspect = scaled_source_width as f32 / scaled_source_height as f32;
     let canvas_aspect = canvas_width as f32 / canvas_height as f32;
 
-    let (target_width, target_height) = match fit {
+    let (base_width, base_height) = match fit {
         backlayer_types::ImageFitMode::Contain => {
             if source_aspect > canvas_aspect {
                 (
@@ -1268,6 +1748,13 @@ fn preview_sprite_layout(
             }
         }
     };
+    let (target_width, target_height) = match fit {
+        backlayer_types::ImageFitMode::Center => (base_width, base_height),
+        _ => (
+            ((base_width as f32) * sprite.scale).round().max(1.0) as u32,
+            ((base_height as f32) * sprite.scale).round().max(1.0) as u32,
+        ),
+    };
 
     let x = ((canvas_width as i64 - target_width as i64) / 2) + sprite.x.round() as i64;
     let y = ((canvas_height as i64 - target_height as i64) / 2) + sprite.y.round() as i64;
@@ -1275,8 +1762,10 @@ fn preview_sprite_layout(
 }
 
 fn overlay_effect_preview(canvas: &mut RgbaImage, effect: &SceneEffectNode) {
-    let [red, green, blue] =
-        parse_color_components(&sanitize_effect_color_hex(effect.color_hex.as_deref(), &effect.effect));
+    let [red, green, blue] = parse_color_components(&sanitize_effect_color_hex(
+        effect.color_hex.as_deref(),
+        &effect.effect,
+    ));
     let mut layer = match effect.effect {
         SceneEffectKind::Glow => render_glow_overlay(
             canvas.width(),
@@ -1373,9 +1862,10 @@ fn apply_layer_opacity(layer: &mut RgbaImage, opacity: f32) {
 }
 
 fn tint_emitter_preview_layer(layer: &mut RgbaImage, emitter: &SceneEmitterNode) {
-    let [red, green, blue] = parse_color_components(
-        &sanitize_emitter_color_hex(emitter.color_hex.as_deref(), &emitter.preset),
-    );
+    let [red, green, blue] = parse_color_components(&sanitize_emitter_color_hex(
+        emitter.color_hex.as_deref(),
+        &emitter.preset,
+    ));
     let red = (red * 255.0).round().clamp(0.0, 255.0) as u8;
     let green = (green * 255.0).round().clamp(0.0, 255.0) as u8;
     let blue = (blue * 255.0).round().clamp(0.0, 255.0) as u8;
@@ -1611,28 +2101,37 @@ fn decode_data_url_image(
     data_url: &str,
     file_name: Option<&str>,
 ) -> Result<(DynamicImage, String), ConfigError> {
+    let (bytes, extension) = decode_data_url_bytes(data_url, file_name)?;
+    let image = image::load_from_memory(&bytes).map_err(|error| {
+        ConfigError::UnsupportedImportPath(format!("failed to load selected image: {error}"))
+    })?;
+
+    Ok((image, extension))
+}
+
+fn decode_data_url_bytes(
+    data_url: &str,
+    file_name: Option<&str>,
+) -> Result<(Vec<u8>, String), ConfigError> {
     let (header, payload) = data_url
         .split_once(',')
-        .ok_or_else(|| ConfigError::UnsupportedImportPath("invalid image data URL".into()))?;
+        .ok_or_else(|| ConfigError::UnsupportedImportPath("invalid data URL".into()))?;
 
     if !header.ends_with(";base64") {
         return Err(ConfigError::UnsupportedImportPath(
-            "scene composer only accepts base64 image data URLs".into(),
+            "only base64 data URLs are supported".into(),
         ));
     }
 
     let bytes = STANDARD.decode(payload).map_err(|error| {
-        ConfigError::UnsupportedImportPath(format!("failed to decode selected image: {error}"))
-    })?;
-    let image = image::load_from_memory(&bytes).map_err(|error| {
-        ConfigError::UnsupportedImportPath(format!("failed to load selected image: {error}"))
+        ConfigError::UnsupportedImportPath(format!("failed to decode selected file: {error}"))
     })?;
 
     let mime = header
         .strip_prefix("data:")
         .and_then(|value| value.strip_suffix(";base64"))
-        .unwrap_or("image/png");
-    let extension = image_extension_for_mime(mime)
+        .unwrap_or("application/octet-stream");
+    let extension = extension_for_mime(mime)
         .or_else(|| {
             file_name
                 .and_then(|name| Path::new(name).extension())
@@ -1641,40 +2140,54 @@ fn decode_data_url_image(
         })
         .unwrap_or_else(|| "png".to_string());
 
-    Ok((image, extension))
+    Ok((bytes, extension))
 }
 
-fn image_extension_for_mime(mime: &str) -> Option<String> {
+fn extension_for_mime(mime: &str) -> Option<String> {
     match mime {
         "image/png" => Some("png".into()),
         "image/jpeg" => Some("jpg".into()),
         "image/webp" => Some("webp".into()),
         "image/x-portable-pixmap" => Some("ppm".into()),
+        "video/mp4" => Some("mp4".into()),
+        "video/x-matroska" => Some("mkv".into()),
+        "video/webm" => Some("webm".into()),
+        "video/quicktime" => Some("mov".into()),
+        "text/plain" => Some("wgsl".into()),
+        "application/octet-stream" => None,
         _ => None,
     }
 }
 
-fn encode_image_file_as_data_url(path: &Path) -> Result<String, ConfigError> {
-    let bytes = fs::read(path)?;
-    let image = image::load_from_memory(&bytes).map_err(|error| {
-        ConfigError::UnsupportedImportPath(format!(
-            "failed to load scene image {}: {error}",
-            path.display()
-        ))
-    })?;
-    let mut encoded = Vec::new();
-    image
-        .write_to(&mut std::io::Cursor::new(&mut encoded), image::ImageFormat::Png)
-        .map_err(|error| {
-            ConfigError::UnsupportedImportPath(format!(
-                "failed to encode scene image {}: {error}",
-                path.display()
-            ))
-        })?;
-    Ok(format!(
-        "data:image/png;base64,{}",
-        STANDARD.encode(encoded)
-    ))
+fn relative_path(root: &Path, path: &Path) -> PathBuf {
+    path.strip_prefix(root)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn generate_video_preview(
+    entrypoint: &Path,
+    asset_root: &Path,
+) -> Result<Option<PathBuf>, ConfigError> {
+    let preview_path = asset_root.join("preview.png");
+    let status = std::process::Command::new("ffmpeg")
+        .arg("-y")
+        .arg("-v")
+        .arg("error")
+        .arg("-i")
+        .arg(entrypoint)
+        .arg("-frames:v")
+        .arg("1")
+        .arg("-update")
+        .arg("1")
+        .arg(&preview_path)
+        .status()?;
+
+    if !status.success() || !preview_path.is_file() {
+        return Ok(None);
+    }
+
+    Ok(Some(PathBuf::from("preview.png")))
 }
 
 fn slugify_name(name: &str) -> String {
@@ -1818,7 +2331,7 @@ fn compatibility_for_kind(kind: &WallpaperKind) -> CompatibilityStatus {
 
 fn default_import_warnings(kind: &WallpaperKind) -> Vec<String> {
     match kind {
-        WallpaperKind::Video => vec!["video import is recognized, but Backlayer video playback is still unfinished".into()],
+        WallpaperKind::Video => vec!["video import is recognized and first-pass playback is available through video-runner, but libmpv and hardware decode are still unfinished".into()],
         WallpaperKind::Scene => vec!["scene wallpaper imported for compatibility tracking, but a scene runtime is not implemented yet".into()],
         WallpaperKind::Web => vec!["web wallpaper imported for compatibility tracking, but a web runtime is not implemented yet".into()],
         WallpaperKind::Image | WallpaperKind::Shader => Vec::new(),
@@ -2037,12 +2550,20 @@ mod tests {
     use backlayer_types::{
         CreateSceneAssetRequest, CreateSceneImageSourceRequest, ImageFitMode, NativeSceneDocument,
         SceneBehavior, SceneBehaviorKind, SceneBlendMode, SceneColorStop, SceneCurvePoint,
-        SceneEffectKind, SceneEffectNode, SceneEmitterNode, SceneEmitterPreset,
-        SceneEmitterShape, SceneNode, SceneSpriteNode, WallpaperKind,
+        SceneEffectKind, SceneEffectNode, SceneEmitterNode, SceneEmitterPreset, SceneEmitterShape,
+        SceneNode, SceneSpriteNode, WallpaperKind,
     };
     use base64::{Engine as _, engine::general_purpose::STANDARD};
 
     use super::ConfigStore;
+
+    const PNG_1X1_RGBA: &[u8] = &[
+        0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, b'I', b'H',
+        b'D', b'R', 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+        0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, b'I', b'D', b'A', b'T', 0x78,
+        0x9C, 0x63, 0xF8, 0xCF, 0xC0, 0xF0, 0x1F, 0x00, 0x05, 0x00, 0x01, 0xFF, 0x89, 0x99,
+        0x3D, 0x1D, 0x00, 0x00, 0x00, 0x00, b'I', b'E', b'N', b'D', 0xAE, 0x42, 0x60, 0x82,
+    ];
 
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -2101,7 +2622,7 @@ mod tests {
 
     #[test]
     fn resolves_tilde_prefixed_paths() {
-        let _guard = env_lock().lock().expect("env lock should succeed");
+        let _guard = env_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let store = ConfigStore;
         let home = std::env::var("HOME").expect("HOME should exist in tests");
 
@@ -2134,7 +2655,7 @@ mod tests {
 
     #[test]
     fn imports_wallpaper_engine_web_item() {
-        let _guard = env_lock().lock().expect("env lock should succeed");
+        let _guard = env_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let store = ConfigStore;
         let root = temp_fixture_dir("backlayer-import-web");
         let item = root.join("123");
@@ -2171,7 +2692,7 @@ mod tests {
 
     #[test]
     fn imports_workshop_root_with_multiple_items() {
-        let _guard = env_lock().lock().expect("env lock should succeed");
+        let _guard = env_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let store = ConfigStore;
         let root = temp_fixture_dir("backlayer-import-root");
         let workshop_root = root.join("workshop");
@@ -2209,8 +2730,40 @@ mod tests {
     }
 
     #[test]
+    fn native_file_assets_are_packaged_as_backlayer_files() {
+        let _guard = env_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let store = ConfigStore;
+        let root = temp_fixture_dir("backlayer-native-package");
+        unsafe {
+            std::env::set_var("HOME", &root);
+        }
+
+        let asset = store
+            .create_native_file_asset(&backlayer_types::CreateNativeAssetRequest {
+                name: "Packaged Image".into(),
+                kind: backlayer_types::WallpaperKind::Image,
+                data_url: format!("data:image/png;base64,{}", STANDARD.encode(PNG_1X1_RGBA)),
+                filename: "wallpaper.png".into(),
+            })
+            .expect("native image asset should be created");
+
+        assert!(
+            asset.asset_path
+                .as_ref()
+                .is_some_and(|path| path.ends_with("image.packaged-image.backlayer"))
+        );
+        assert!(
+            root.join(".config/backlayer/assets/image.packaged-image.backlayer")
+                .is_file()
+        );
+
+        let discovered = store.discover_all_assets().expect("assets should discover");
+        assert!(discovered.iter().any(|candidate| candidate.id == asset.id));
+    }
+
+    #[test]
     fn import_uses_named_preview_when_project_does_not_declare_one() {
-        let _guard = env_lock().lock().expect("env lock should succeed");
+        let _guard = env_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let store = ConfigStore;
         let root = temp_fixture_dir("backlayer-import-named-preview");
         let item = root.join("200");
@@ -2242,7 +2795,7 @@ mod tests {
 
     #[test]
     fn import_falls_back_to_first_image_when_no_preview_name_exists() {
-        let _guard = env_lock().lock().expect("env lock should succeed");
+        let _guard = env_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let store = ConfigStore;
         let root = temp_fixture_dir("backlayer-import-first-image");
         let item = root.join("201");
@@ -2275,7 +2828,7 @@ mod tests {
 
     #[test]
     fn creates_native_scene_v2_asset_document() {
-        let _guard = env_lock().lock().expect("env lock should succeed");
+        let _guard = env_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let store = ConfigStore;
         let root = temp_fixture_dir("backlayer-native-scene-v2");
         unsafe {
@@ -2298,12 +2851,14 @@ mod tests {
                         STANDARD.encode(fs::read(&source).expect("source should read"))
                     )),
                     base_image_filename: Some("source.png".into()),
+                    base_image_path: None,
                     extra_images: vec![CreateSceneImageSourceRequest {
                         key: "overlay".into(),
-                        data_url: format!(
+                        data_url: Some(format!(
                             "data:image/png;base64,{}",
                             STANDARD.encode(fs::read(&source).expect("source should read"))
-                        ),
+                        )),
+                        existing_path: None,
                         filename: "overlay.png".into(),
                     }],
                     nodes: vec![
@@ -2319,6 +2874,9 @@ mod tests {
                             scale: 1.0,
                             rotation_deg: 0.0,
                             opacity: 1.0,
+                            particle_occluder: false,
+                            particle_surface: false,
+                            particle_region: None,
                             behaviors: vec![SceneBehavior {
                                 kind: SceneBehaviorKind::Drift,
                                 speed: 1.0,
@@ -2340,6 +2898,9 @@ mod tests {
                             scale: 0.7,
                             rotation_deg: 0.0,
                             opacity: 0.65,
+                            particle_occluder: false,
+                            particle_surface: false,
+                            particle_region: None,
                             behaviors: vec![SceneBehavior {
                                 kind: SceneBehaviorKind::Pulse,
                                 speed: 1.4,
@@ -2400,6 +2961,7 @@ mod tests {
                             drag: 0.05,
                             color_hex: Some("#f4f7ff".into()),
                             particle_image_key: Some("overlay".into()),
+                            particle_rotation_deg: Some(0.0),
                             size_curve: vec![
                                 SceneCurvePoint { x: 0.0, y: 0.8 },
                                 SceneCurvePoint { x: 0.5, y: 1.0 },
@@ -2411,8 +2973,14 @@ mod tests {
                                 SceneCurvePoint { x: 1.0, y: 0.1 },
                             ],
                             color_curve: vec![
-                                SceneColorStop { x: 0.0, color_hex: "#ffffff".into() },
-                                SceneColorStop { x: 1.0, color_hex: "#dbe8ff".into() },
+                                SceneColorStop {
+                                    x: 0.0,
+                                    color_hex: "#ffffff".into(),
+                                },
+                                SceneColorStop {
+                                    x: 1.0,
+                                    color_hex: "#dbe8ff".into(),
+                                },
                             ],
                         }),
                     ],
@@ -2424,11 +2992,15 @@ mod tests {
         assert_eq!(asset.kind, WallpaperKind::Scene);
         assert!(asset.animated);
 
-        let scene_path = store
+        let scene_package = store
             .resolve_path(store.default_user_assets_path())
             .expect("user assets path should resolve")
-            .join(&asset.id)
-            .join("scene.json");
+            .join(format!("{}.backlayer", asset.id));
+        assert!(scene_package.is_file());
+        let extracted_root = store
+            .extract_package_to_cache(&scene_package)
+            .expect("scene package should extract");
+        let scene_path = extracted_root.join("scene.json");
         let document: NativeSceneDocument = serde_json::from_str(
             &fs::read_to_string(scene_path).expect("scene document should exist"),
         )
