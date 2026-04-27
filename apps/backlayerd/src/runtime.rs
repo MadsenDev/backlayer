@@ -760,16 +760,20 @@ fn start_runner_process(
         for arg in args {
             command.arg(arg);
         }
-        command
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|error| RendererSessionStatus::Failed {
-                reason: format!(
-                    "failed to launch {runner_name} at {}: {error}",
-                    runner_path.display()
-                ),
-            })
+        let result = command
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .spawn();
+        match &result {
+            Ok(child) => info!(runner = runner_name, pid = child.id(), path = %runner_path.display(), "runner process spawned"),
+            Err(error) => info!(runner = runner_name, %error, path = %runner_path.display(), "runner process spawn failed"),
+        }
+        result.map_err(|error| RendererSessionStatus::Failed {
+            reason: format!(
+                "failed to launch {runner_name} at {}: {error}",
+                runner_path.display()
+            ),
+        })
     } else {
         let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -780,22 +784,27 @@ fn start_runner_process(
                     "failed to resolve workspace root for cargo {runner_name} fallback"
                 ),
             })?;
+        info!(runner = runner_name, workspace = %workspace_root.display(), "runner binary not found, using cargo run fallback");
         let mut command = Command::new("cargo");
         command.arg("run").arg("-p").arg(runner_name).arg("--");
         for arg in args {
             command.arg(arg);
         }
-        command
+        let result = command
             .current_dir(&workspace_root)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|error| RendererSessionStatus::Failed {
-                reason: format!(
-                    "failed to launch {runner_name} via cargo from {}: {error}",
-                    workspace_root.display()
-                ),
-            })
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .spawn();
+        match &result {
+            Ok(child) => info!(runner = runner_name, pid = child.id(), "cargo runner process spawned"),
+            Err(error) => info!(runner = runner_name, %error, "cargo runner process spawn failed"),
+        }
+        result.map_err(|error| RendererSessionStatus::Failed {
+            reason: format!(
+                "failed to launch {runner_name} via cargo from {}: {error}",
+                workspace_root.display()
+            ),
+        })
     }
 }
 

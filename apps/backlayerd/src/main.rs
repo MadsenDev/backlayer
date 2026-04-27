@@ -75,56 +75,24 @@ fn main() -> Result<()> {
         shader.clone(),
         video.clone(),
     );
-    let runtime_plan = coordinator.start(&daemon_state);
-    daemon_state.runtime = runtime_plan.clone();
 
     info!(path = %config_path.display(), "backlayer daemon bootstrap");
     info!(ipc = %config_store.default_socket_path().display(), "ui/daemon ipc path");
     info!(config = ?loaded_config, "loaded config");
     info!(monitors = ?monitors, "monitor discovery bootstrap");
     info!(runtime = ?wayland.bootstrap_status(), "wayland bootstrap plan");
-    match wayland.probe() {
-        Ok(status) => info!(runtime = ?status, "wayland runtime probe"),
-        Err(error) => info!(%error, "wayland runtime probe failed"),
-    }
-    if let Some(primary_monitor) = monitors.first() {
-        match wayland.probe_on_output(Some(&primary_monitor.output_name)) {
-            Ok(status) => info!(
-                output = %primary_monitor.output_name,
-                runtime = ?status,
-                "wayland output-bound probe"
-            ),
-            Err(error) => info!(
-                output = %primary_monitor.output_name,
-                %error,
-                "wayland output-bound probe failed"
-            ),
-        }
-        match wayland.start_session_on_output(Some(&primary_monitor.output_name)) {
-            Ok(session) => info!(
-                output = %primary_monitor.output_name,
-                runtime = ?session.status(),
-                "wayland persistent session bootstrap"
-            ),
-            Err(error) => info!(
-                output = %primary_monitor.output_name,
-                %error,
-                "wayland persistent session bootstrap failed"
-            ),
-        }
-    }
     info!(renderers = ?[image.name(), shader.name(), video.name()], "registered renderers");
     info!(runtime_dependencies = ?runtime_dependencies, "runtime dependency status");
     info!(assets = ?assets, "discovered wallpaper assets");
-    info!(runtime_plan = ?runtime_plan, "planned renderer sessions");
-    info!(
-        response = ?DaemonResponse::State {
-            state: daemon_state.clone()
-        },
-        "sample daemon state payload"
-    );
 
     if run_mode == "--serve" {
+        // In serve mode, build the plan without creating any Wayland sessions.
+        // The runtime manager's apply() call inside serve_forever will immediately
+        // spawn the actual runner subprocesses. Creating probe sessions here would
+        // leave ghost surfaces in the compositor that overlap with the runners.
+        let runtime_plan = coordinator.build_plan(&daemon_state);
+        daemon_state.runtime = runtime_plan.clone();
+        info!(runtime_plan = ?runtime_plan, "planned renderer sessions");
         let socket_path = config_store.resolve_path(config_store.default_socket_path())?;
         ipc::serve_forever(
             &socket_path,
@@ -133,6 +101,47 @@ fn main() -> Result<()> {
             assets,
             compositor,
         )?;
+    } else {
+        // Probe-only mode: run full diagnostics and render preview wallpapers.
+        match wayland.probe() {
+            Ok(status) => info!(runtime = ?status, "wayland runtime probe"),
+            Err(error) => info!(%error, "wayland runtime probe failed"),
+        }
+        if let Some(primary_monitor) = monitors.first() {
+            match wayland.probe_on_output(Some(&primary_monitor.output_name)) {
+                Ok(status) => info!(
+                    output = %primary_monitor.output_name,
+                    runtime = ?status,
+                    "wayland output-bound probe"
+                ),
+                Err(error) => info!(
+                    output = %primary_monitor.output_name,
+                    %error,
+                    "wayland output-bound probe failed"
+                ),
+            }
+            match wayland.start_session_on_output(Some(&primary_monitor.output_name)) {
+                Ok(session) => info!(
+                    output = %primary_monitor.output_name,
+                    runtime = ?session.status(),
+                    "wayland persistent session bootstrap"
+                ),
+                Err(error) => info!(
+                    output = %primary_monitor.output_name,
+                    %error,
+                    "wayland persistent session bootstrap failed"
+                ),
+            }
+        }
+        let runtime_plan = coordinator.start(&daemon_state);
+        daemon_state.runtime = runtime_plan.clone();
+        info!(runtime_plan = ?runtime_plan, "planned renderer sessions");
+        info!(
+            response = ?DaemonResponse::State {
+                state: daemon_state.clone()
+            },
+            "sample daemon state payload"
+        );
     }
 
     Ok(())

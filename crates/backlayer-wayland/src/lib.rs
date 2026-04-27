@@ -144,9 +144,13 @@ impl LayerShellRuntime {
 }
 
 pub struct LayerSurfaceSession {
-    conn: Connection,
-    event_queue: EventQueue<LayerShellProbe>,
+    // Drop order matters: state (layer surface) must be destroyed before event_queue,
+    // and event_queue before conn (socket). This ensures destroy protocol messages are
+    // queued in the socket buffer before close(), so the compositor receives them
+    // and removes the surface synchronously rather than via async disconnect cleanup.
     state: LayerShellProbe,
+    event_queue: EventQueue<LayerShellProbe>,
+    conn: Connection,
 }
 
 impl LayerSurfaceSession {
