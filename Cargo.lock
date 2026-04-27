@@ -232,6 +232,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "backlayer-kde"
+version = "0.2.0"
+dependencies = [
+ "backlayer-types",
+ "smithay-client-toolkit",
+ "thiserror 2.0.18",
+ "wayland-client",
+]
+
+[[package]]
 name = "backlayer-renderer-image"
 version = "0.2.0"
 dependencies = [
@@ -307,6 +317,7 @@ dependencies = [
  "anyhow",
  "backlayer-config",
  "backlayer-hyprland",
+ "backlayer-kde",
  "backlayer-renderer-image",
  "backlayer-renderer-shader",
  "backlayer-renderer-video",

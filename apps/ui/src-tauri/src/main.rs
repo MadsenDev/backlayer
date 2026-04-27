@@ -4,6 +4,9 @@ use std::{
     fs,
     io::{Read, Write},
     os::unix::net::UnixStream,
+    path::Path,
+    process::{Command, Stdio},
+    time::Duration,
 };
 
 use backlayer_config::ConfigStore;
@@ -263,8 +266,55 @@ fn daemon_request(request: DaemonRequest) -> Result<DaemonResponse, String> {
         .map_err(|error| format!("failed to decode daemon response: {error}"))
 }
 
+fn daemon_binary_path() -> std::path::PathBuf {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join("backlayerd");
+            if candidate.exists() {
+                return candidate;
+            }
+        }
+    }
+    std::path::PathBuf::from("backlayerd")
+}
+
+fn socket_is_alive(socket_path: &Path) -> bool {
+    UnixStream::connect(socket_path).is_ok()
+}
+
+fn ensure_daemon_running() {
+    let store = ConfigStore::default();
+    let socket_path = match store.resolve_path(store.default_socket_path()) {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+
+    if socket_is_alive(&socket_path) {
+        return;
+    }
+
+    let _ = Command::new(daemon_binary_path())
+        .arg("--serve")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    // Child handle dropped — daemon outlives the UI process
+
+    for _ in 0..6 {
+        std::thread::sleep(Duration::from_millis(500));
+        if socket_is_alive(&socket_path) {
+            break;
+        }
+    }
+}
+
 fn main() {
     tauri::Builder::default()
+        .setup(|_app| {
+            ensure_daemon_running();
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             daemon_get_state,
             daemon_list_assets,

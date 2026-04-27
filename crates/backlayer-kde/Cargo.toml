@@ -1,0 +1,12 @@
+[package]
+name = "backlayer-kde"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+backlayer-types.workspace = true
+smithay-client-toolkit.workspace = true
+thiserror.workspace = true
+wayland-client.workspace = true

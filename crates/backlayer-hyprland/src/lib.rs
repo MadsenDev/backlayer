@@ -1,6 +1,6 @@
 use std::process::Command;
 
-use backlayer_types::MonitorInfo;
+use backlayer_types::{CompositorClient, MonitorInfo};
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -124,6 +124,22 @@ impl HyprlandClient {
             slugify(model).unwrap_or_else(|| "unknown".to_string()),
             fingerprint
         )
+    }
+}
+
+impl CompositorClient for HyprlandClient {
+    fn compositor_name(&self) -> &'static str {
+        "hyprland"
+    }
+
+    fn discover_monitors(
+        &self,
+    ) -> Result<Vec<MonitorInfo>, Box<dyn std::error::Error + Send + Sync>> {
+        HyprlandClient::discover_monitors(self).map_err(Into::into)
+    }
+
+    fn fullscreen_active(&self) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        HyprlandClient::fullscreen_active(self).map_err(Into::into)
     }
 }
 

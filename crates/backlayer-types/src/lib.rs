@@ -593,6 +593,14 @@ pub enum DaemonResponse {
     Error { message: String },
 }
 
+pub trait CompositorClient: Send + Sync + std::fmt::Debug {
+    fn compositor_name(&self) -> &'static str;
+    fn discover_monitors(
+        &self,
+    ) -> Result<Vec<MonitorInfo>, Box<dyn std::error::Error + Send + Sync>>;
+    fn fullscreen_active(&self) -> Result<bool, Box<dyn std::error::Error + Send + Sync>>;
+}
+
 fn default_false() -> bool {
     false
 }

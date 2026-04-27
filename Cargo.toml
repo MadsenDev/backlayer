@@ -9,6 +9,7 @@ members = [
   "apps/ui/src-tauri",
   "crates/backlayer-config",
   "crates/backlayer-hyprland",
+  "crates/backlayer-kde",
   "crates/backlayer-renderer-image",
   "crates/backlayer-renderer-shader",
   "crates/backlayer-renderer-video",
@@ -27,13 +28,16 @@ authors = ["Backlayer contributors"]
 anyhow = "1.0.100"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
+smithay-client-toolkit = "0.20.0"
 thiserror = "2.0.17"
 toml = "0.9.8"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
+wayland-client = { version = "0.31.13", features = ["system"] }
 wgpu = "26.0.1"
 backlayer-config = { path = "crates/backlayer-config" }
 backlayer-hyprland = { path = "crates/backlayer-hyprland" }
+backlayer-kde = { path = "crates/backlayer-kde" }
 backlayer-renderer-image = { path = "crates/backlayer-renderer-image" }
 backlayer-renderer-shader = { path = "crates/backlayer-renderer-shader" }
 backlayer-renderer-video = { path = "crates/backlayer-renderer-video" }

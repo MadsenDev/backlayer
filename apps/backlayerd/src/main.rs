@@ -1,16 +1,39 @@
 mod ipc;
 mod runtime;
 
+use std::sync::Arc;
+
 use anyhow::Result;
 use backlayer_config::ConfigStore;
 use backlayer_hyprland::HyprlandClient;
+use backlayer_kde::KdeClient;
 use backlayer_renderer_image::ImageRenderer;
 use backlayer_renderer_shader::ShaderRenderer;
 use backlayer_renderer_video::VideoRenderer;
-use backlayer_types::{DaemonResponse, DaemonState, RuntimeDependencies};
+use backlayer_types::{CompositorClient, DaemonResponse, DaemonState, RuntimeDependencies};
 use backlayer_wayland::LayerShellRuntime;
 use runtime::RuntimeCoordinator;
 use tracing::info;
+
+fn detect_compositor() -> Arc<dyn CompositorClient> {
+    let desktop = std::env::var("XDG_CURRENT_DESKTOP")
+        .unwrap_or_default()
+        .to_lowercase();
+    let is_hyprland = desktop.contains("hyprland")
+        || std::env::var("HYPRLAND_INSTANCE_SIGNATURE").is_ok();
+    let is_kde = desktop.contains("kde") || desktop.contains("plasma");
+
+    if is_hyprland {
+        info!("detected compositor: hyprland");
+        Arc::new(HyprlandClient::new())
+    } else if is_kde {
+        info!("detected compositor: kde");
+        Arc::new(KdeClient::new())
+    } else {
+        info!(desktop = %desktop, "compositor unknown, defaulting to hyprland client");
+        Arc::new(HyprlandClient::new())
+    }
+}
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -18,10 +41,10 @@ fn main() -> Result<()> {
         .compact()
         .init();
 
+    let compositor = detect_compositor();
     let config_store = ConfigStore::default();
     let config_path = config_store.default_config_path();
     let resolved_config_path = config_store.resolve_path(&config_path)?;
-    let hyprland = HyprlandClient::new();
     let wayland = LayerShellRuntime::new();
     let run_mode = std::env::args()
         .nth(1)
@@ -35,7 +58,9 @@ fn main() -> Result<()> {
     };
     let loaded_config = config_store.load_or_default();
     let assets = config_store.discover_all_assets()?;
-    let monitors = hyprland.discover_monitors()?;
+    let monitors = compositor
+        .discover_monitors()
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     let mut daemon_state = DaemonState {
         monitors: monitors.clone(),
         assignments: loaded_config.assignments.clone(),
@@ -101,7 +126,13 @@ fn main() -> Result<()> {
 
     if run_mode == "--serve" {
         let socket_path = config_store.resolve_path(config_store.default_socket_path())?;
-        ipc::serve_forever(&socket_path, &resolved_config_path, daemon_state, assets)?;
+        ipc::serve_forever(
+            &socket_path,
+            &resolved_config_path,
+            daemon_state,
+            assets,
+            compositor,
+        )?;
     }
 
     Ok(())

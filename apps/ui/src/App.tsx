@@ -1,11 +1,10 @@
 import { motion } from 'framer-motion'
-import { memo, startTransition, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import type { ChangeEvent, ReactNode } from 'react'
 import { convertFileSrc } from '@tauri-apps/api/core'
 import {
   FiActivity,
   FiAlertCircle,
-  FiCpu,
   FiDisc,
   FiDownload,
   FiFilm,
@@ -22,7 +21,6 @@ import {
   assignWallpaper,
   createNativeAsset,
   createSceneAsset,
-  fetchRuntimeSnapshot,
   importWorkshopPath,
   loadAssetPreviewDataUrl,
   loadEditableSceneAsset,
@@ -32,6 +30,12 @@ import {
   updateAssignmentSettings,
   updatePausePolicy,
 } from './api'
+import { useSnapshot } from './hooks/useSnapshot'
+import { useTheme } from './hooks/useTheme'
+import type { ActiveTheme, ThemePreference } from './hooks/useTheme'
+import { StartupScreen } from './components/StartupScreen'
+import { WallpaperCard } from './components/WallpaperCard'
+import { DetailPanel } from './components/DetailPanel'
 import type {
   AssetMetadata,
   AssignmentSettings,
@@ -39,7 +43,6 @@ import type {
   CreateSceneAssetRequest,
   CreateSceneImageSourceRequest,
   EditableSceneImage,
-  ImageFitMode,
   PausePolicy,
   RuntimeSnapshot,
   SceneBehaviorKind,
@@ -56,8 +59,6 @@ import type {
   SceneSpriteNode,
 } from './types'
 
-type ThemePreference = 'system' | 'light' | 'dark'
-type ActiveTheme = 'light' | 'dark'
 type UINotice = {
   title: string
   detail: string
@@ -91,7 +92,6 @@ type AssetContextMenuState = {
 }
 type CreateAssetKind = 'image' | 'scene' | 'shader' | 'video'
 
-const THEME_PREFERENCE_KEY = 'backlayer.theme.preference'
 const SCENE_EFFECT_OPTIONS: Array<{
   effect: SceneEffectKind
   label: string
@@ -490,8 +490,9 @@ function normalizeColorHex(colorHex: string | null | undefined) {
 }
 
 function App() {
-  const [snapshot, setSnapshot] = useState<RuntimeSnapshot | null>(null)
-  const [loading, setLoading] = useState(true)
+  const { snapshot, loading, documentVisible, refresh: refreshSnapshot } = useSnapshot()
+  const { activeTheme, preference: themePreference, setPreference: setThemePreference } = useTheme()
+
   const [busy, setBusy] = useState<string | null>(null)
   const [uiError, setUiError] = useState<string | null>(null)
   const [selectedMonitorId, setSelectedMonitorId] = useState<string | null>(null)
@@ -524,84 +525,11 @@ function App() {
   const [particleEditorNodeId, setParticleEditorNodeId] = useState<string | null>(null)
   const [notice, setNotice] = useState<UINotice | null>(null)
   const [assetContextMenu, setAssetContextMenu] = useState<AssetContextMenuState | null>(null)
-  const [themePreference, setThemePreference] = useState<ThemePreference>(() => readThemePreference())
-  const [systemTheme, setSystemTheme] = useState<ActiveTheme>(() => detectSystemTheme())
-  const [documentVisible, setDocumentVisible] = useState(() => typeof document === 'undefined' ? true : !document.hidden)
-  const [disconnectedPollMs, setDisconnectedPollMs] = useState(5000)
   const composerFileInputRef = useRef<HTMLInputElement | null>(null)
   const composerSpriteFileInputRef = useRef<HTMLInputElement | null>(null)
   const createImageFileInputRef = useRef<HTMLInputElement | null>(null)
   const createVideoFileInputRef = useRef<HTMLInputElement | null>(null)
   const createShaderFileInputRef = useRef<HTMLInputElement | null>(null)
-
-  async function refreshSnapshot(includeAssets = false) {
-    const nextSnapshot = await fetchRuntimeSnapshot({
-      includeAssets,
-    })
-    startTransition(() => {
-      setSnapshot((current) => ({
-        ...nextSnapshot,
-        assets: includeAssets ? nextSnapshot.assets : current?.assets ?? nextSnapshot.assets,
-      }))
-      setLoading(false)
-    })
-    if (nextSnapshot.source === 'tauri_disconnected') {
-      setDisconnectedPollMs((current) => Math.min(current * 2, 30000))
-    } else {
-      setDisconnectedPollMs(5000)
-    }
-    return nextSnapshot
-  }
-
-  useEffect(() => {
-    let cancelled = false
-
-    void fetchRuntimeSnapshot({ includeAssets: true }).then((nextSnapshot) => {
-      if (cancelled) {
-        return
-      }
-
-      startTransition(() => {
-        setSnapshot(nextSnapshot)
-        setLoading(false)
-      })
-    })
-
-    return () => {
-      cancelled = true
-    }
-  }, [])
-
-  useEffect(() => {
-    const updateVisibility = () => {
-      setDocumentVisible(!document.hidden)
-    }
-    document.addEventListener('visibilitychange', updateVisibility)
-    window.addEventListener('focus', updateVisibility)
-    window.addEventListener('blur', updateVisibility)
-    return () => {
-      document.removeEventListener('visibilitychange', updateVisibility)
-      window.removeEventListener('focus', updateVisibility)
-      window.removeEventListener('blur', updateVisibility)
-    }
-  }, [])
-
-  useEffect(() => {
-    if (snapshot?.source !== 'tauri' && snapshot?.source !== 'tauri_disconnected') {
-      return
-    }
-
-    const intervalMs = snapshot.source === 'tauri_disconnected'
-      ? disconnectedPollMs
-      : documentVisible ? 5000 : 30000
-    const timeout = window.setTimeout(() => {
-      void refreshSnapshot(false).catch(() => {})
-    }, intervalMs)
-
-    return () => {
-      window.clearTimeout(timeout)
-    }
-  }, [disconnectedPollMs, documentVisible, snapshot?.source])
 
   const assignments = snapshot?.state.assignments ?? []
   const monitors = snapshot?.state.monitors ?? []
@@ -618,7 +546,6 @@ function App() {
     kindFilter !== 'all' ? kindFilter : null,
     compatibilityFilter !== 'all' ? compatibilityFilter : null,
   ].filter(Boolean) as string[]
-  const activeTheme: ActiveTheme = themePreference === 'system' ? systemTheme : themePreference
   const filteredAssets = useMemo(() => assets.filter((asset) => {
     const search = deferredAssetSearch.trim().toLowerCase()
     const matchesSearch =
@@ -648,11 +575,8 @@ function App() {
     : null
   , [assignments, selectedMonitor])
   const selectedAsset = useMemo(() =>
-    assets.find((asset) => asset.id === selectedAssetId)
-    ?? selectedAssignment?.wallpaper
-    ?? assets[0]
-    ?? null
-  , [assets, selectedAssetId, selectedAssignment])
+    selectedAssetId ? assets.find((asset) => asset.id === selectedAssetId) ?? null : null
+  , [assets, selectedAssetId])
   const composerBaseAsset = composerBaseAssetId
     ? assets.find((asset) => asset.id === composerBaseAssetId) ?? null
     : null
@@ -674,12 +598,6 @@ function App() {
       setSelectedMonitorId(monitors[0].id)
     }
   }, [monitors, selectedMonitor])
-
-  useEffect(() => {
-    if (!selectedAsset && assets[0]) {
-      setSelectedAssetId(assets[0].id)
-    }
-  }, [assets, selectedAsset])
 
   useEffect(() => {
     if (composerOpen && composerSourceName && !composerName) {
@@ -747,32 +665,6 @@ function App() {
     }
   }, [assetContextMenu])
 
-  useEffect(() => {
-    const media = window.matchMedia('(prefers-color-scheme: dark)')
-    const updateTheme = (event?: MediaQueryListEvent) => {
-      setSystemTheme(event?.matches ?? media.matches ? 'dark' : 'light')
-    }
-
-    updateTheme()
-    media.addEventListener('change', updateTheme)
-    return () => {
-      media.removeEventListener('change', updateTheme)
-    }
-  }, [])
-
-  useEffect(() => {
-    window.localStorage.setItem(THEME_PREFERENCE_KEY, themePreference)
-  }, [themePreference])
-
-  useEffect(() => {
-    document.documentElement.dataset.theme = activeTheme
-    document.documentElement.style.colorScheme = activeTheme
-
-    return () => {
-      delete document.documentElement.dataset.theme
-      document.documentElement.style.removeProperty('color-scheme')
-    }
-  }, [activeTheme])
 
   useEffect(() => {
     if (workshopEnabled) {
@@ -1197,19 +1089,26 @@ function closeComposer() {
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.45, ease: 'easeOut' }}
       >
-        <header className="flex flex-col gap-3 border-b border-white/10 bg-white/[0.03] px-4 py-3 lg:px-5">
+        <header
+          className="flex shrink-0 flex-col gap-0 px-4 py-3 lg:px-5"
+          style={{ borderBottom: '1px solid var(--border)', background: 'var(--panel-bg)' }}
+        >
           <div className="flex items-center justify-between gap-4">
             <div className="flex min-w-0 items-center gap-3">
-              <div className="surface-muted p-2 text-cyan-200">
-                <FiDisc className="size-4" />
-              </div>
+              <img
+                src="/icon.png"
+                alt="Backlayer"
+                className="size-8 shrink-0"
+                style={{ borderRadius: 'var(--radius-control)' }}
+              />
               <div className="min-w-0">
                 <div className="section-title">Backlayer</div>
-                <div className="mt-0.5 flex min-w-0 items-center gap-3">
-                  <h1 className="truncate text-base font-semibold tracking-[-0.03em] text-white md:text-lg">
-                    Wallpaper Browser
-                  </h1>
-                </div>
+                <h1
+                  className="truncate text-base font-semibold tracking-[-0.02em]"
+                  style={{ color: 'var(--text-primary)' }}
+                >
+                  Wallpaper Manager
+                </h1>
               </div>
             </div>
 
@@ -1262,348 +1161,228 @@ function closeComposer() {
               </button>
             </div>
           </div>
-
-          <div className="surface-panel flex min-w-0 flex-col gap-2 px-3.5 py-3 lg:flex-row lg:items-center lg:justify-between">
-            <div className="min-w-0">
-              <div className="flex min-w-0 flex-wrap items-center gap-2">
-                <div className="truncate text-base font-semibold text-white">
-                  {selectedAsset?.name ?? 'Select a wallpaper'}
-                </div>
-                <span className="control-chip">{selectedMonitor?.output_name ?? 'No monitor'}</span>
-                <span className="control-chip">
-                  {selectedAssignment?.wallpaper.id === selectedAsset?.id ? 'assigned' : 'preview target'}
-                </span>
-                {selectedAsset ? <span className="control-chip">{selectedAsset.kind}</span> : null}
-                {selectedAsset?.kind === 'shader' && selectedAsset.animated ? <span className="control-chip"><FiZap className="size-3" /> animated</span> : null}
-                {selectedAsset?.kind === 'image' && selectedAsset.image_fit ? <span className="control-chip">{selectedAsset.image_fit}</span> : null}
-                {workshopEnabled && selectedAsset?.source_kind === 'wallpaper_engine_import' ? <span className="control-chip">workshop import</span> : null}
-                {selectedAsset ? <span className="control-chip">{selectedAsset.compatibility.status}</span> : null}
-              </div>
-              <p className="mt-1 line-clamp-1 max-w-3xl text-sm leading-5 text-slate-400">
-                {selectedAsset
-                  ? assetSummary(selectedAsset)
-                  : 'Pick a wallpaper from the browser to inspect it and apply it to the selected monitor.'}
-              </p>
-            </div>
-            {selectedMonitor ? (
-              <button
-                type="button"
-                disabled={!selectedAsset || snapshot?.source !== 'tauri' || busy === `assign:${selectedMonitor.id}`}
-                onClick={() => {
-                  if (!selectedAsset) {
-                    return
-                  }
-                  void handleAssignWallpaper(selectedMonitor.id, selectedAsset.id)
-                }}
-                className="primary-button shrink-0 disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                <FiDisc className="size-4" />
-                {busy === `assign:${selectedMonitor.id}` ? 'Assigning...' : `Apply to ${selectedMonitor.output_name}`}
-              </button>
-            ) : null}
-          </div>
           {notice ? (
-            <div className="tone-info flex items-start justify-between gap-3 px-3.5 py-3 text-sm">
+            <div
+              className="mt-3 flex items-start justify-between gap-3 px-3.5 py-3 text-sm"
+              style={{
+                borderRadius: 'var(--radius-control)',
+                border: '1px solid color-mix(in srgb, var(--accent) 35%, var(--border))',
+                background: 'color-mix(in srgb, var(--accent-soft) 70%, var(--panel-bg))',
+                color: 'var(--accent)',
+              }}
+            >
               <div>
                 <div className="font-medium">{notice.title}</div>
-                <div className="mt-1 text-cyan-50/90">{notice.detail}</div>
+                <div className="mt-1" style={{ color: 'var(--text-secondary)' }}>{notice.detail}</div>
               </div>
-              <button className="icon-button shrink-0" onClick={() => setNotice(null)} type="button">
+              <button
+                className="icon-button shrink-0"
+                onClick={() => setNotice(null)}
+                type="button"
+                style={{ borderRadius: 'var(--radius-control)' }}
+              >
                 <FiX className="size-4" />
               </button>
             </div>
           ) : null}
         </header>
 
-        <div className="min-h-0 flex-1 bg-white/5">
-          <section className="grid h-full min-h-0 grid-rows-[minmax(0,1fr)] gap-5 overflow-hidden bg-slate-950/55 p-4 lg:p-6">
-            <div className="grid min-h-0 gap-5 xl:grid-cols-[minmax(0,1fr)_340px]">
-                <div className="surface-panel grid min-h-0 h-full grid-rows-[auto_auto_minmax(0,1fr)] overflow-hidden p-4">
-                  <div className="mb-3 shrink-0 flex flex-col gap-3 border-b border-white/10 pb-3 xl:flex-row xl:items-center xl:justify-between">
-                    <div className="flex min-w-0 items-center gap-3">
-                      <p className="section-title">Wallpaper Browser</p>
-                      <span className="control-chip shrink-0">{filteredAssets.length} / {assets.length} assets</span>
-                    </div>
-                    <div className="flex w-full flex-col gap-2 xl:w-auto xl:flex-row xl:items-center">
-                      <input
-                        className="field-shell w-full xl:w-80"
-                        onChange={(event) => setAssetSearch(event.currentTarget.value)}
-                        placeholder="Search wallpapers..."
-                        type="text"
-                        value={assetSearch}
-                      />
-                      <div className="flex items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={() => setFiltersOpen((open) => !open)}
-                          className={[
-                            'inline-flex shrink-0 items-center gap-2 border px-3.5 py-2 text-sm transition',
-                            filtersOpen || hasActiveFilters
-                              ? 'border-emerald-300/30 bg-emerald-300/10 text-emerald-100'
-                              : 'border-white/10 bg-white/5 text-white hover:bg-white/10',
-                          ].join(' ')}
-                        >
-                          <FiFilter className="size-4" />
-                          Filters
-                          {hasActiveFilters ? <span className="control-chip border-emerald-300/20 text-emerald-100">{activeFilterSummary.length}</span> : null}
-                        </button>
-                        {hasActiveFilters ? (
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setSourceFilter('all')
-                              setKindFilter('all')
-                              setCompatibilityFilter('all')
-                            }}
-                            className="secondary-button shrink-0"
-                          >
-                            Clear
-                          </button>
-                        ) : null}
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="mb-3 shrink-0 space-y-2">
-                    {hasActiveFilters ? (
-                      <div className="flex flex-wrap gap-2">
-                        {activeFilterSummary.map((filter) => (
-                          <span key={filter} className="control-chip">
-                            {filter}
-                          </span>
-                        ))}
-                      </div>
-                    ) : null}
-
-                    {filtersOpen ? (
-                      <div className="surface-muted p-3">
-                        <div className="space-y-3">
-                          <div>
-                            <div className="mb-2 text-[11px] uppercase tracking-[0.16em] text-slate-500">Source</div>
-                            <div className="flex flex-wrap gap-2">
-                              <FilterChip
-                                active={sourceFilter === 'all'}
-                                label="All Sources"
-                                onClick={() => setSourceFilter('all')}
-                              />
-                              <FilterChip
-                                active={sourceFilter === 'native'}
-                                label="Native"
-                                onClick={() => setSourceFilter('native')}
-                              />
-                              {workshopEnabled ? (
-                                <FilterChip
-                                  active={sourceFilter === 'wallpaper_engine_import'}
-                                  label="Workshop"
-                                  onClick={() => setSourceFilter('wallpaper_engine_import')}
-                                />
-                              ) : null}
-                            </div>
-                          </div>
-                          <div>
-                            <div className="mb-2 text-[11px] uppercase tracking-[0.16em] text-slate-500">Type</div>
-                            <div className="flex flex-wrap gap-2">
-                              {(['all', 'image', 'video', 'shader', 'scene', 'web'] as const).map((kind) => (
-                                <FilterChip
-                                  key={kind}
-                                  active={kindFilter === kind}
-                                  label={kind === 'all' ? 'All Types' : kind}
-                                  onClick={() => setKindFilter(kind)}
-                                />
-                              ))}
-                            </div>
-                          </div>
-                          <div>
-                            <div className="mb-2 text-[11px] uppercase tracking-[0.16em] text-slate-500">State</div>
-                            <div className="flex flex-wrap gap-2">
-                              {(['all', 'supported', 'partial', 'unsupported'] as const).map((status) => (
-                                <FilterChip
-                                  key={status}
-                                  active={compatibilityFilter === status}
-                                  label={status === 'all' ? 'All States' : status}
-                                  onClick={() => setCompatibilityFilter(status)}
-                                />
-                              ))}
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    ) : null}
-                  </div>
-
-                  <div className="min-h-0 overflow-y-auto overflow-x-hidden overscroll-contain pr-1 pb-2">
-                    <div className="grid gap-4 pb-1 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
-                      {filteredAssets.map((asset, index) => {
-                        const selected = selectedAsset?.id === asset.id
-                        return (
-                          <motion.button
-                            key={asset.id}
-                            type="button"
-                            onClick={() => setSelectedAssetId(asset.id)}
-                            onContextMenu={(event) => {
-                              event.preventDefault()
-                              event.stopPropagation()
-                              setAssetContextMenu({
-                                assetId: asset.id,
-                                x: event.clientX,
-                                y: event.clientY,
-                              })
-                            }}
-                            initial={{ opacity: 0, y: 12 }}
-                            animate={{ opacity: 1, y: 0 }}
-                            transition={{ duration: 0.22, delay: index * 0.015 }}
-                            className="text-left"
-                          >
-                            <AssetCard asset={asset} selected={selected} workshopEnabled={workshopEnabled} />
-                          </motion.button>
-                        )
-                      })}
-                    </div>
-                    {filteredAssets.length === 0 ? (
-                      <div className="mt-4">
-                        <EmptyState text="No wallpapers match the current search and filter combination." />
-                      </div>
-                    ) : null}
-                  </div>
-                </div>
-
-                <div className="surface-panel grid min-h-0 h-full grid-rows-[auto_minmax(0,1fr)] overflow-hidden p-4">
-                  <div className="mb-4 flex shrink-0 items-center gap-3">
-                    <div className="rounded-2xl border border-white/10 bg-white/5 p-2 text-slate-200">
-                      <FiCpu className="size-4" />
-                    </div>
-                    <div>
-                      <p className="section-title">Inspector</p>
-                      <div className="mt-1 text-sm text-slate-300">Wallpaper, assignment, and runtime details in one pane.</div>
-                    </div>
-                  </div>
-
-                  <div className="min-h-0 overflow-y-auto overflow-x-hidden overscroll-contain pr-1 pb-2">
-                    <div className="space-y-4">
-                    <InspectorHero
-                      asset={selectedAsset}
-                      monitorName={selectedMonitor?.output_name ?? 'No monitor'}
-                      runtimeLabel={selectedRuntime
-                        ? selectedRuntime.status.kind === 'ready'
-                          ? `${selectedRuntime.spec.backend} • ${selectedRuntime.status.persistent ? 'live worker' : 'snapshot'}${selectedRuntime.status.paused_reason ? ` • paused` : ''}`
-                          : selectedRuntime.status.reason
-                        : 'No runtime session'}
-                    />
-                    {selectedAsset?.kind === 'image' && selectedMonitor ? (
-                      <ImageFitControl
-                        busy={busy === `assignment-settings:${selectedMonitor.id}`}
-                        currentFit={selectedAssignment?.settings.image_fit ?? selectedAsset.image_fit ?? 'cover'}
-                        onChange={(imageFit) => {
-                          void handleAssignmentSettingsChange(selectedMonitor.id, { image_fit: imageFit })
-                        }}
-                      />
-                    ) : null}
-                    <div className="grid gap-3">
-                      <InspectorMiniCard
-                        icon={<FiMonitor className="size-4" />}
-                        title="Assignment"
-                        emphasis={selectedAssignment?.wallpaper.name ?? 'Unassigned'}
-                        meta={[
-                          selectedMonitor
-                            ? `${selectedMonitor.width}x${selectedMonitor.height} @ ${selectedMonitor.refresh_rate.toFixed(2)}Hz`
-                            : 'No monitor selected',
-                          selectedMonitor ? `Position ${selectedMonitor.x}, ${selectedMonitor.y}` : null,
-                        ]}
-                      />
-                      <InspectorMiniCard
-                        icon={<FiCpu className="size-4" />}
-                        title="Runtime"
-                        emphasis={selectedRuntime?.status.kind === 'ready'
-                          ? `${selectedRuntime.spec.backend} • ${selectedRuntime.status.persistent ? 'live worker' : 'snapshot'}`
-                          : selectedRuntime?.status.reason ?? 'No runtime session'}
-                        meta={[
-                          selectedRuntime?.status.kind === 'ready'
-                            ? `Output ${selectedRuntime.status.output_name}`
-                            : null,
-                          selectedRuntime?.status.kind === 'ready' && selectedRuntime.status.paused_reason
-                            ? `Paused: ${selectedRuntime.status.paused_reason}`
-                            : null,
-                          selectedRuntime?.status.kind === 'ready'
-                            ? selectedRuntime.status.detail ?? null
-                            : null,
-                        ]}
-                      />
-                    </div>
-                    {workshopEnabled && selectedAsset?.source_kind === 'wallpaper_engine_import' ? (
-                      <div className="rounded-[22px] border border-cyan-300/20 bg-cyan-300/10 p-4 text-sm text-cyan-100">
-                        <div className="mb-2 font-medium">Imported Runtime Mode</div>
-                        <div className="leading-6 text-cyan-50/90">
-                          {importRuntimeNote(selectedAsset.kind)}
-                        </div>
-                      </div>
-                    ) : null}
-                    <button
-                      type="button"
-                      onClick={() => setAdvancedOpen(true)}
-                      className="flex w-full items-center gap-3 rounded-[22px] border border-white/10 bg-white/[0.03] p-4 text-left text-white transition hover:bg-white/[0.05]"
-                    >
-                      <div className="rounded-2xl border border-white/10 bg-white/5 p-2 text-slate-200">
-                        <FiActivity className="size-4" />
-                      </div>
-                      <div>
-                        <div className="font-medium">Technical Details</div>
-                        <div className="mt-1 text-sm text-slate-400">Wallpaper id, entrypoint, and monitor metadata.</div>
-                      </div>
-                    </button>
-                    {selectedAsset?.compatibility.warnings.length ? (
-                      <div className="rounded-[22px] border border-amber-300/20 bg-amber-300/10 p-4 text-sm text-amber-100">
-                        <div className="mb-2 font-medium">Compatibility Notes</div>
-                        <div className="space-y-2">
-                          {selectedAsset.compatibility.warnings.slice(0, 3).map((warning) => (
-                            <div key={warning}>{warning}</div>
-                          ))}
-                        </div>
-                      </div>
-                    ) : null}
-                    {selectedAsset?.kind === 'scene' && selectedAsset.source_kind === 'native' ? (
-                      <button
-                        type="button"
-                        disabled={busy === `load-scene:${selectedAsset.id}` || snapshot?.source !== 'tauri'}
-                        onClick={() => {
-                          void openComposerForExistingScene(selectedAsset)
-                        }}
-                        className="inline-flex w-full items-center justify-center gap-2 rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-3 text-sm font-medium text-white transition hover:bg-white/[0.08] disabled:cursor-not-allowed disabled:opacity-60"
-                      >
-                        <FiSliders className={busy === `load-scene:${selectedAsset.id}` ? 'size-4 animate-spin' : 'size-4'} />
-                        {busy === `load-scene:${selectedAsset.id}` ? 'Opening scene...' : 'Edit scene'}
-                      </button>
-                    ) : null}
-                    {workshopEnabled && selectedAsset?.source_kind === 'wallpaper_engine_import' && selectedAsset.import_metadata?.source_path ? (
-                      <div className="grid gap-3 sm:grid-cols-2">
-                        <button
-                          type="button"
-                          disabled={busy === `reimport:${selectedAsset.id}` || snapshot?.source !== 'tauri'}
-                          onClick={() => {
-                            void handleReimportAsset(selectedAsset.id)
-                          }}
-                          className="inline-flex w-full items-center justify-center gap-2 rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-3 text-sm font-medium text-white transition hover:bg-white/[0.08] disabled:cursor-not-allowed disabled:opacity-60"
-                        >
-                          <FiRefreshCw className={busy === `reimport:${selectedAsset.id}` ? 'size-4 animate-spin' : 'size-4'} />
-                          {busy === `reimport:${selectedAsset.id}` ? 'Reimporting...' : 'Reimport from source'}
-                        </button>
-                        <button
-                          type="button"
-                          disabled={busy === `remove:${selectedAsset.id}` || snapshot?.source !== 'tauri'}
-                          onClick={() => {
-                            void handleRemoveAsset(selectedAsset.id)
-                          }}
-                          className="inline-flex w-full items-center justify-center gap-2 rounded-2xl border border-rose-300/20 bg-rose-400/10 px-4 py-3 text-sm font-medium text-rose-100 transition hover:bg-rose-400/20 disabled:cursor-not-allowed disabled:opacity-60"
-                        >
-                          <FiX className="size-4" />
-                          {busy === `remove:${selectedAsset.id}` ? 'Removing...' : 'Remove import'}
-                        </button>
-                      </div>
-                    ) : null}
-                    </div>
-                  </div>
-                </div>
+        <div className="relative min-h-0 flex-1 overflow-hidden" style={{ background: 'var(--app-bg)' }}>
+          <div className="flex h-full flex-col overflow-hidden">
+            {/* Search and filter bar */}
+            <div
+              className="flex shrink-0 flex-wrap items-center gap-3 px-4 py-3"
+              style={{ borderBottom: '1px solid var(--border)', background: 'var(--panel-bg)' }}
+            >
+              <div className="flex min-w-0 flex-1 items-center gap-3">
+                <span
+                  className="shrink-0 text-xs font-medium"
+                  style={{ color: 'var(--text-tertiary)' }}
+                >
+                  {filteredAssets.length} / {assets.length}
+                </span>
+                <input
+                  className="field-shell min-w-0 flex-1 sm:max-w-xs"
+                  onChange={(event) => setAssetSearch(event.currentTarget.value)}
+                  placeholder="Search wallpapers…"
+                  type="text"
+                  value={assetSearch}
+                />
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setFiltersOpen((open) => !open)}
+                  className="toolbar-button shrink-0"
+                  style={filtersOpen || hasActiveFilters ? {
+                    border: '1px solid var(--accent)',
+                    color: 'var(--accent)',
+                    background: 'var(--accent-soft)',
+                  } : undefined}
+                >
+                  <FiFilter className="size-4" />
+                  Filters
+                  {hasActiveFilters ? (
+                    <span className="control-chip">{activeFilterSummary.length}</span>
+                  ) : null}
+                </button>
+                {hasActiveFilters ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSourceFilter('all')
+                      setKindFilter('all')
+                      setCompatibilityFilter('all')
+                    }}
+                    className="secondary-button shrink-0"
+                  >
+                    Clear
+                  </button>
+                ) : null}
+              </div>
             </div>
-          </section>
+
+            {/* Filter panel */}
+            {filtersOpen ? (
+              <div
+                className="shrink-0 px-4 py-3"
+                style={{ borderBottom: '1px solid var(--border)', background: 'var(--panel-muted)' }}
+              >
+                <div className="space-y-3">
+                  <div>
+                    <div
+                      className="mb-2 text-[11px] uppercase tracking-[0.16em]"
+                      style={{ color: 'var(--text-tertiary)' }}
+                    >
+                      Source
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <FilterChip active={sourceFilter === 'all'} label="All Sources" onClick={() => setSourceFilter('all')} />
+                      <FilterChip active={sourceFilter === 'native'} label="Native" onClick={() => setSourceFilter('native')} />
+                      {workshopEnabled ? (
+                        <FilterChip
+                          active={sourceFilter === 'wallpaper_engine_import'}
+                          label="Workshop"
+                          onClick={() => setSourceFilter('wallpaper_engine_import')}
+                        />
+                      ) : null}
+                    </div>
+                  </div>
+                  <div>
+                    <div
+                      className="mb-2 text-[11px] uppercase tracking-[0.16em]"
+                      style={{ color: 'var(--text-tertiary)' }}
+                    >
+                      Type
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {(['all', 'image', 'video', 'shader', 'scene', 'web'] as const).map((kind) => (
+                        <FilterChip
+                          key={kind}
+                          active={kindFilter === kind}
+                          label={kind === 'all' ? 'All Types' : kind}
+                          onClick={() => setKindFilter(kind)}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                  <div>
+                    <div
+                      className="mb-2 text-[11px] uppercase tracking-[0.16em]"
+                      style={{ color: 'var(--text-tertiary)' }}
+                    >
+                      State
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {(['all', 'supported', 'partial', 'unsupported'] as const).map((status) => (
+                        <FilterChip
+                          key={status}
+                          active={compatibilityFilter === status}
+                          label={status === 'all' ? 'All States' : status}
+                          onClick={() => setCompatibilityFilter(status)}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ) : null}
+
+            {/* Wallpaper grid */}
+            <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4">
+              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5">
+                {filteredAssets.map((asset, index) => {
+                  const selected = selectedAsset?.id === asset.id
+                  const assigned = selectedAssignment?.wallpaper.id === asset.id
+                  return (
+                    <motion.button
+                      key={asset.id}
+                      type="button"
+                      onClick={() => setSelectedAssetId(selected ? null : asset.id)}
+                      onContextMenu={(event) => {
+                        event.preventDefault()
+                        event.stopPropagation()
+                        setAssetContextMenu({
+                          assetId: asset.id,
+                          x: event.clientX,
+                          y: event.clientY,
+                        })
+                      }}
+                      initial={{ opacity: 0, y: 12 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      transition={{ duration: 0.22, delay: index * 0.015 }}
+                      className="text-left"
+                    >
+                      <WallpaperCard
+                        asset={asset}
+                        selected={selected}
+                        assigned={assigned}
+                        workshopEnabled={workshopEnabled}
+                      />
+                    </motion.button>
+                  )
+                })}
+              </div>
+              {filteredAssets.length === 0 ? (
+                <div className="mt-4">
+                  <EmptyState text="No wallpapers match the current search and filter combination." />
+                </div>
+              ) : null}
+            </div>
+          </div>
+
+          {/* Slide-out detail panel */}
+          <DetailPanel
+            asset={selectedAsset}
+            monitor={selectedMonitor}
+            assignment={selectedAssignment}
+            runtimeSession={selectedRuntime}
+            busy={busy}
+            workshopEnabled={workshopEnabled}
+            snapshotSource={snapshot?.source}
+            onAssign={() => {
+              if (!selectedAsset || !selectedMonitor) return
+              void handleAssignWallpaper(selectedMonitor.id, selectedAsset.id)
+            }}
+            onClose={() => setSelectedAssetId(null)}
+            onEditScene={() => {
+              if (!selectedAsset) return
+              void openComposerForExistingScene(selectedAsset)
+            }}
+            onReimport={() => {
+              if (!selectedAsset) return
+              void handleReimportAsset(selectedAsset.id)
+            }}
+            onRemove={() => {
+              if (!selectedAsset) return
+              void handleRemoveAsset(selectedAsset.id)
+            }}
+            onImageFitChange={(fit) => {
+              if (!selectedMonitor) return
+              void handleAssignmentSettingsChange(selectedMonitor.id, { image_fit: fit })
+            }}
+            onOpenTechDetails={() => setAdvancedOpen(true)}
+          />
         </div>
       </motion.div>
 
@@ -2563,6 +2342,7 @@ function closeComposer() {
                   { key: 'base', label: composerSourceName ?? 'Base image' },
                   ...composerExtraImages.map((image) => ({ key: image.key, label: image.name })),
                 ]}
+                baseImageUrl={composerUploadImage?.sourceUrl ?? (composerBaseAsset ? convertFileSrc(composerBaseAsset.entrypoint) : null)}
                 documentVisible={documentVisible}
                 node={particleEditorNode}
                 onClose={() => setParticleEditorNodeId(null)}
@@ -2581,52 +2361,7 @@ function closeComposer() {
 
 export default App
 
-function StartupScreen({ activeTheme }: { activeTheme: ActiveTheme }) {
-  return (
-    <main className="h-dvh overflow-hidden p-3" data-theme={activeTheme}>
-      <div className="glass-panel flex h-full w-full items-center justify-center">
-        <motion.div
-          className="surface-panel w-full max-w-[420px] p-8 text-center"
-          initial={{ opacity: 0, y: 14 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.35, ease: 'easeOut' }}
-        >
-          <div className="mx-auto mb-5 flex size-14 items-center justify-center rounded-full border border-cyan-300/25 bg-cyan-300/10 text-cyan-200">
-            <FiRefreshCw className="size-5 animate-spin" />
-          </div>
-          <div className="section-title">Backlayer</div>
-          <div className="mt-2 text-xl font-semibold tracking-[-0.03em] text-white">
-            Loading runtime
-          </div>
-          <div className="mt-3 text-sm leading-6 text-slate-300">
-            Connecting to the daemon, reading wallpapers, and preparing the manager UI.
-          </div>
-        </motion.div>
-      </div>
-    </main>
-  )
-}
 
-function detectSystemTheme(): ActiveTheme {
-  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
-    return 'light'
-  }
-
-  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
-}
-
-function readThemePreference(): ThemePreference {
-  if (typeof window === 'undefined') {
-    return 'system'
-  }
-
-  const stored = window.localStorage.getItem(THEME_PREFERENCE_KEY)
-  if (stored === 'light' || stored === 'dark' || stored === 'system') {
-    return stored
-  }
-
-  return 'system'
-}
 
 function buildDefaultComposerNodes(): SceneNode[] {
   return [
@@ -2803,47 +2538,6 @@ function isUserManagedAsset(asset: AssetMetadata) {
   )
 }
 
-function assetSummary(asset: AssetMetadata) {
-  if (asset.kind === 'shader') {
-    return asset.animated
-      ? 'Animated shader wallpaper running through the dedicated shader runner process.'
-      : 'Static shader wallpaper for testing the real shader runtime without extra motion.'
-  }
-
-  if (asset.kind === 'image') {
-    return `Image wallpaper using the ${asset.image_fit ?? 'cover'} fit mode.`
-  }
-
-  if (asset.kind === 'scene') {
-    return asset.source_kind === 'wallpaper_engine_import'
-      ? 'Imported Wallpaper Engine scene item. Classified and stored successfully, but scene playback is not implemented yet.'
-      : 'Native real-time scene built from sprite, effect, and particle nodes in Backlayer Scene Composer.'
-  }
-
-  if (asset.kind === 'web') {
-    return asset.source_kind === 'wallpaper_engine_import'
-      ? 'Imported Wallpaper Engine web item. Classified and stored successfully, but web wallpaper playback is not implemented yet.'
-      : 'Web wallpaper support is planned but not implemented.'
-  }
-
-  return asset.source_kind === 'wallpaper_engine_import'
-    ? 'Imported Wallpaper Engine video item. Backlayer can now play video through the dedicated video runner, with libmpv and hardware decode still pending.'
-    : 'Video wallpaper running through the dedicated FFmpeg-backed video runner.'
-}
-
-function importRuntimeNote(kind: AssetMetadata['kind']) {
-  switch (kind) {
-    case 'scene':
-      return 'Imported Wallpaper Engine scene items are currently limited to static scene-image extraction or preview fallback. Full scene playback and animation are not implemented yet.'
-    case 'web':
-      return 'Imported Wallpaper Engine web items currently render a narrow static subset: a local HTML image, a parsed background color, or the preview fallback. Real browser-backed wallpaper playback is not implemented yet.'
-    case 'video':
-      return 'Imported Wallpaper Engine video items now use first-pass FFmpeg-backed playback in video-runner. libmpv integration and hardware decode are still not finished.'
-    default:
-      return 'Native Backlayer scene assets use a real-time scene graph with sprites, effects, and particle emitters.'
-  }
-}
-
 function StatusPill({
   loading,
   source,
@@ -2852,96 +2546,25 @@ function StatusPill({
   source: RuntimeSnapshot['source'] | undefined
 }) {
   if (loading) {
-    return <span className="control-chip border-cyan-300/30 text-cyan-200">Loading runtime</span>
+    return <span className="control-chip">Loading runtime</span>
   }
 
   if (source === 'tauri') {
-    return <span className="control-chip border-emerald-300/30 text-emerald-200">Connected to daemon</span>
+    return (
+      <span
+        className="control-chip"
+        style={{ borderColor: 'color-mix(in srgb, var(--accent) 35%, var(--border))', color: 'var(--accent)' }}
+      >
+        Connected
+      </span>
+    )
   }
 
   if (source === 'tauri_disconnected') {
-    return <span className="control-chip border-amber-300/30 text-amber-200">Daemon unavailable</span>
+    return <span className="control-chip tone-warning">Daemon unavailable</span>
   }
 
-  return <span className="control-chip border-slate-300/20 text-slate-300">Browser fallback</span>
-}
-
-function InspectorHero({
-  asset,
-  monitorName,
-  runtimeLabel,
-}: {
-  asset: AssetMetadata | null
-  monitorName: string
-  runtimeLabel: string
-}) {
-  return (
-    <div className="overflow-hidden rounded-[24px] border border-white/10 bg-white/[0.04]">
-      <div className="h-28 border-b border-white/10 bg-slate-950/80">
-        {asset ? <AssetPreview asset={asset} /> : null}
-      </div>
-      <div className="space-y-3 p-4">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div className="min-w-0">
-            <div className="text-lg font-semibold tracking-[-0.03em] text-white">
-              {asset?.name ?? 'No wallpaper selected'}
-            </div>
-            <div className="mt-1 text-sm leading-6 text-slate-300">
-              {asset ? assetSummary(asset) : 'Select a wallpaper to see settings and assignment details.'}
-            </div>
-          </div>
-          {asset ? (
-            <span className="control-chip shrink-0">
-              {asset.kind}
-            </span>
-          ) : null}
-        </div>
-        <div className="flex flex-wrap gap-2">
-          <span className="control-chip">{monitorName}</span>
-          <span className="control-chip">{runtimeLabel}</span>
-          {asset?.kind === 'shader' && asset.animated ? (
-            <span className="control-chip">
-              <FiZap className="size-3" /> animated
-            </span>
-          ) : null}
-          {asset?.kind === 'image' && asset.image_fit ? (
-            <span className="control-chip">{asset.image_fit}</span>
-          ) : null}
-          {asset?.source_kind === 'wallpaper_engine_import' ? (
-            <span className="control-chip">workshop import</span>
-          ) : null}
-          {asset ? <span className="control-chip">{asset.compatibility.status}</span> : null}
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function InspectorMiniCard({
-  icon,
-  title,
-  emphasis,
-  meta,
-}: {
-  icon: React.ReactNode
-  title: string
-  emphasis: string
-  meta: Array<string | null>
-}) {
-  return (
-    <div className="rounded-[22px] border border-white/10 bg-white/[0.035] p-4">
-      <div className="mb-2 flex items-center gap-3">
-        <div className="rounded-2xl border border-white/10 bg-white/5 p-2 text-slate-200">{icon}</div>
-        <div className="text-sm font-medium text-white">{title}</div>
-      </div>
-      <div className="text-sm font-medium text-white">{emphasis}</div>
-      <div className="mt-2 space-y-1.5 text-sm text-slate-400">
-        {meta.filter(Boolean).map((line) => (
-          <div key={line}>{line}</div>
-        ))}
-      </div>
-    </div>
-  )
+  return <span className="control-chip">Browser fallback</span>
 }
 
 function PolicyToggle({
@@ -3035,222 +2658,18 @@ function FilterChip({
     <button
       type="button"
       onClick={onClick}
-      className={[
-        'rounded-full border px-3 py-1.5 text-xs uppercase tracking-[0.16em] transition',
-        active
-          ? 'border-emerald-300/40 bg-emerald-300/15 text-emerald-100'
-          : 'border-white/10 bg-white/[0.03] text-slate-300 hover:bg-white/[0.06]',
-      ].join(' ')}
+      className="px-3 py-1.5 text-xs uppercase tracking-[0.16em] transition"
+      style={{
+        borderRadius: 'var(--radius-control)',
+        border: active ? '1px solid var(--accent)' : '1px solid var(--border)',
+        background: active ? 'var(--accent-soft)' : 'var(--panel-bg)',
+        color: active ? 'var(--accent)' : 'var(--text-secondary)',
+      }}
     >
       {label}
     </button>
   )
 }
-
-function ImageFitControl({
-  busy,
-  currentFit,
-  onChange,
-}: {
-  busy: boolean
-  currentFit: ImageFitMode
-  onChange: (fit: ImageFitMode) => void
-}) {
-  const options: ImageFitMode[] = ['cover', 'contain', 'stretch', 'center']
-
-  return (
-    <div className="rounded-[24px] border border-white/10 bg-white/[0.04] p-4">
-      <div className="mb-1 flex items-center gap-3">
-        <div className="rounded-2xl border border-white/10 bg-white/5 p-2 text-slate-200">
-          <FiDisc className="size-4" />
-        </div>
-        <div>
-          <div className="text-sm font-medium text-white">Image Fit</div>
-          <div className="text-xs text-slate-400">Adjust how the selected image wallpaper fills the screen.</div>
-        </div>
-      </div>
-      <div className="mt-3 grid grid-cols-2 gap-2">
-        {options.map((fit) => {
-          const active = currentFit === fit
-          return (
-            <button
-              key={fit}
-              type="button"
-              disabled={busy}
-              onClick={() => onChange(fit)}
-              className={[
-                'rounded-[16px] border px-3 py-2 text-sm capitalize transition',
-                active
-                  ? 'border-emerald-300/40 bg-emerald-300/15 text-emerald-100'
-                  : 'border-white/10 bg-white/[0.03] text-slate-300 hover:bg-white/[0.06]',
-                busy ? 'cursor-not-allowed opacity-60' : '',
-              ].join(' ')}
-            >
-              {fit}
-            </button>
-          )
-        })}
-      </div>
-    </div>
-  )
-}
-
-const AssetPreview = memo(function AssetPreview({ asset }: { asset: AssetMetadata }) {
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null)
-  const [visible, setVisible] = useState(false)
-  const containerRef = useRef<HTMLDivElement | null>(null)
-  const previewPath = asset.preview_image ?? (asset.kind === 'image' ? asset.entrypoint : null)
-
-  useEffect(() => {
-    const node = containerRef.current
-    if (!node || typeof IntersectionObserver === 'undefined') {
-      setVisible(true)
-      return
-    }
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries.some((entry) => entry.isIntersecting)) {
-          setVisible(true)
-          observer.disconnect()
-        }
-      },
-      { rootMargin: '240px' },
-    )
-    observer.observe(node)
-    return () => {
-      observer.disconnect()
-    }
-  }, [])
-
-  useEffect(() => {
-    let cancelled = false
-
-    if (!visible) {
-      return
-    }
-
-    if (!previewPath) {
-      setPreviewUrl(null)
-      return
-    }
-
-    void loadAssetPreviewDataUrl(previewPath)
-      .then((url) => {
-        if (!cancelled) {
-          setPreviewUrl(url)
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setPreviewUrl(null)
-        }
-      })
-
-    return () => {
-      cancelled = true
-    }
-  }, [previewPath, visible])
-
-  return (
-    <div
-      ref={containerRef}
-      className="h-full w-full bg-cover bg-center"
-      style={{ backgroundImage: `url("${previewUrl ?? assetPreviewDataUri(asset)}")` }}
-    />
-  )
-})
-
-const AssetCard = memo(function AssetCard({
-  asset,
-  selected,
-  workshopEnabled,
-}: {
-  asset: AssetMetadata
-  selected: boolean
-  workshopEnabled: boolean
-}) {
-  const detailChips = []
-
-  if (asset.kind === 'shader' && asset.animated) {
-    detailChips.push(
-      <span key="animated" className="control-chip">
-        <FiZap className="size-3" /> animated
-      </span>,
-    )
-  }
-
-  if (asset.kind === 'image' && asset.image_fit) {
-    detailChips.push(
-      <span key="fit" className="control-chip">
-        {asset.image_fit}
-      </span>,
-    )
-  }
-
-  if (workshopEnabled && asset.source_kind === 'wallpaper_engine_import') {
-    detailChips.push(
-      <span key="source" className="control-chip">
-        workshop
-      </span>,
-    )
-  }
-
-  return (
-    <div
-      className={[
-        'group grid h-full min-h-[280px] grid-rows-[168px_minmax(0,1fr)] overflow-hidden border transition',
-        selected
-          ? 'border-emerald-300/40 bg-emerald-300/[0.08] shadow-[0_0_0_1px_rgba(89,189,167,0.2)]'
-          : 'border-white/10 bg-white/[0.03] hover:border-white/20 hover:bg-white/[0.05]',
-      ].join(' ')}
-    >
-      <div className="relative border-b border-white/10 bg-slate-950/80">
-        <AssetPreview asset={asset} />
-        <div className="pointer-events-none absolute inset-x-0 bottom-0 h-20 bg-gradient-to-t from-black/40 to-transparent" />
-        <div className="absolute inset-x-0 top-0 flex items-start justify-between gap-3 p-3">
-          <span className="preview-badge">
-            {asset.source_kind === 'wallpaper_engine_import' ? 'Workshop' : asset.kind}
-          </span>
-          <span
-            className={[
-              'control-chip',
-              asset.compatibility.status === 'supported'
-                ? 'border-emerald-300/30 text-emerald-200'
-                : asset.compatibility.status === 'partial'
-                  ? 'border-amber-300/30 text-amber-200'
-                  : 'border-rose-300/30 text-rose-100',
-            ].join(' ')}
-          >
-            {asset.compatibility.status}
-          </span>
-        </div>
-      </div>
-
-      <div className="flex min-h-0 flex-col justify-between gap-4 p-4">
-        <div className="space-y-2">
-          <div className="flex items-start justify-between gap-3">
-            <div className="min-w-0">
-              <div className="truncate text-[15px] font-semibold text-white">{asset.name}</div>
-              <div className="mt-1 truncate text-xs text-slate-400">{asset.id}</div>
-            </div>
-            {selected ? (
-              <span className="control-chip border-emerald-300/30 text-emerald-200">
-                selected
-              </span>
-            ) : null}
-          </div>
-          <p className="line-clamp-3 text-sm leading-6 text-slate-400">
-            {assetSummary(asset)}
-          </p>
-        </div>
-
-        <div className="flex flex-wrap gap-2">
-          {detailChips}
-        </div>
-      </div>
-    </div>
-  )
-})
 
 function pointInRect(x: number, y: number, rect: { x: number; y: number; width: number; height: number }) {
   return x >= rect.x && x <= rect.x + rect.width && y >= rect.y && y <= rect.y + rect.height
@@ -4436,7 +3855,7 @@ function ComposerNodeInspector({
         />
       ) : null}
       {node.kind === 'effect' ? <ComposerEffectInspector node={node} onChange={onChange} /> : null}
-      {node.kind === 'emitter' ? <ComposerEmitterInspector availableImageKeys={availableImageKeys} node={node} onChange={onChange} onOpenParticleEditor={onOpenParticleEditor} /> : null}
+      {node.kind === 'emitter' ? <ComposerEmitterInspector node={node} onChange={onChange} onOpenParticleEditor={onOpenParticleEditor} /> : null}
       {node.kind === 'particle_area' ? <ComposerParticleAreaInspector viewportTool={viewportTool} node={node} onActivateViewportTool={onActivateViewportTool} onChange={onChange} /> : null}
     </div>
   )
@@ -4748,33 +4167,28 @@ function ComposerEffectInspector({
 }
 
 function ComposerEmitterInspector({
-  availableImageKeys,
   node,
   onOpenParticleEditor,
   onChange,
 }: {
-  availableImageKeys: Array<{ key: string; label: string }>
   node: Extract<SceneNode, { kind: 'emitter' }>
   onOpenParticleEditor: (nodeId: string) => void
   onChange: (node: SceneNode) => void
 }) {
   const originX = resolveEmitterOriginX(node)
   const originY = resolveEmitterOriginY(node)
-  const directionDeg = resolveEmitterDirectionDeg(node)
-  const colorHex = resolveEmitterColorHex(node)
   const shape = resolveEmitterShape(node)
-  const minSpeed = resolveEmitterMinSpeed(node)
-  const maxSpeed = resolveEmitterMaxSpeed(node)
-  const minLife = resolveEmitterMinLife(node)
-  const maxLife = resolveEmitterMaxLife(node)
-  const particleRotationDeg = resolveEmitterParticleRotationDeg(node)
-  const sizeCurve = resolveScalarCurve(node.size_curve, defaultEmitterSizeCurve(node.preset))
-  const alphaCurve = resolveScalarCurve(node.alpha_curve, defaultEmitterAlphaCurve(node.preset))
-  const colorCurve = resolveColorCurve(node.color_curve, defaultEmitterColorCurve(node.preset))
-  const particleImageKey = resolveEmitterParticleImageKey(node)
   return (
     <div className="space-y-4">
-      <ComposerSection title="Basic" defaultOpen>
+      <button
+        className="primary-button w-full justify-center"
+        onClick={() => onOpenParticleEditor(node.id)}
+        type="button"
+      >
+        <FiSliders className="size-4" />
+        Edit particles
+      </button>
+      <ComposerSection title="Preset" defaultOpen>
         <div className="grid grid-cols-2 gap-2">
           {SCENE_EMITTER_OPTIONS.map((option) => (
             <button
@@ -4806,8 +4220,9 @@ function ComposerEmitterInspector({
             </button>
           ))}
         </div>
-        <div>
-          <div className="mb-2 text-xs uppercase tracking-[0.18em] text-slate-400">Emitter shape</div>
+      </ComposerSection>
+      <ComposerSection title="Shape" defaultOpen>
+        <div className="space-y-4">
           <div className="grid grid-cols-2 gap-2">
             {(['point', 'box', 'line', 'circle'] as const).map((option) => (
               <button
@@ -4820,28 +4235,6 @@ function ComposerEmitterInspector({
               </button>
             ))}
           </div>
-        </div>
-        <div className="grid gap-3 sm:grid-cols-2">
-          <RangeField
-            label="Emitter X"
-            max={100}
-            min={0}
-            step={1}
-            value={originX * 100}
-            onChange={(value) => onChange({ ...node, origin_x: value / 100 })}
-          />
-          <RangeField
-            label="Emitter Y"
-            max={100}
-            min={0}
-            step={1}
-            value={originY * 100}
-            onChange={(value) => onChange({ ...node, origin_y: value / 100 })}
-          />
-        </div>
-      </ComposerSection>
-      <ComposerSection title="Region" defaultOpen>
-        <div className="space-y-4">
           {shape === 'box' ? (
             <div className="grid gap-3 sm:grid-cols-2">
               <RangeField label="Width" max={100} min={1} step={1} value={resolveEmitterRegionWidth(node) * 100} onChange={(value) => onChange({ ...node, region_width: value / 100 })} />
@@ -4858,117 +4251,11 @@ function ComposerEmitterInspector({
             <RangeField label="Radius" max={100} min={1} step={1} value={resolveEmitterRegionRadius(node) * 100} onChange={(value) => onChange({ ...node, region_radius: value / 100 })} />
           ) : null}
           {shape === 'point' ? (
-            <div className="surface-muted p-3 text-sm text-slate-300">Point emitters spawn from a single anchor in the viewport.</div>
+            <div className="surface-muted p-3 text-sm text-slate-300">Point emitters spawn from a single anchor.</div>
           ) : null}
-        </div>
-      </ComposerSection>
-      <ComposerSection title="Appearance" defaultOpen>
-        <div className="space-y-4">
-          <label className="block">
-            <div className="mb-2 flex items-center justify-between text-xs uppercase tracking-[0.16em] text-slate-400">
-              <span>Tint</span>
-              <span>{colorHex}</span>
-            </div>
-            <input
-              className="h-10 w-full border border-white/10 bg-transparent p-1"
-              type="color"
-              value={colorHex}
-              onChange={(event) => onChange({ ...node, color_hex: event.currentTarget.value })}
-            />
-          </label>
-          <RangeField
-            label="Particle rotation"
-            max={180}
-            min={-180}
-            step={1}
-            value={particleRotationDeg}
-            onChange={(value) => onChange({ ...node, particle_rotation_deg: clampDegrees(value) })}
-          />
-          <div>
-            <div className="mb-2 text-xs uppercase tracking-[0.18em] text-slate-400">Particle image</div>
-            <div className="grid gap-2">
-              <button
-                className={['secondary-button justify-center', particleImageKey === null ? 'border-cyan-300/40 text-cyan-100' : ''].join(' ')}
-                onClick={() => onChange({ ...node, particle_image_key: null })}
-                type="button"
-              >
-                Procedural particle
-              </button>
-              {availableImageKeys.filter((image) => image.key !== 'base').map((image) => (
-                <button
-                  key={image.key}
-                  className={['secondary-button justify-center', particleImageKey === image.key ? 'border-cyan-300/40 text-cyan-100' : ''].join(' ')}
-                  onClick={() => onChange({ ...node, particle_image_key: image.key })}
-                  type="button"
-                >
-                  {image.label}
-                </button>
-              ))}
-            </div>
-          </div>
-          <RangeField label="Opacity" max={1} min={0} step={0.01} value={node.opacity} onChange={(value) => onChange({ ...node, opacity: value })} />
-          <RangeField label="Particle size" max={12} min={1} step={0.1} value={node.size} onChange={(value) => onChange({ ...node, size: value })} />
-        </div>
-      </ComposerSection>
-      <ComposerSection title="Emission" defaultOpen>
-        <div className="space-y-4">
-          <RangeField label="Emission rate" max={160} min={1} step={1} value={node.emission_rate} onChange={(value) => onChange({ ...node, emission_rate: value })} />
-          <RangeField label="Burst count" max={128} min={0} step={1} value={node.burst_count} onChange={(value) => onChange({ ...node, burst_count: value })} />
-          <label className="flex items-center justify-between gap-3 text-sm text-slate-300">
-            <span>Burst on start</span>
-            <input
-              checked={node.burst_on_start}
-              className="size-4 accent-emerald-300"
-              onChange={(event) => onChange({ ...node, burst_on_start: event.currentTarget.checked })}
-              type="checkbox"
-            />
-          </label>
-          <RangeField label="Max particles" max={600} min={8} step={1} value={node.max_particles} onChange={(value) => onChange({ ...node, max_particles: value })} />
           <div className="grid gap-3 sm:grid-cols-2">
-            <RangeField label="Min lifetime" max={12} min={0.2} step={0.1} value={minLife} onChange={(value) => onChange({ ...node, min_life: value })} />
-            <RangeField label="Max lifetime" max={16} min={0.2} step={0.1} value={maxLife} onChange={(value) => onChange({ ...node, max_life: Math.max(value, minLife) })} />
-          </div>
-        </div>
-      </ComposerSection>
-      <ComposerSection title="Motion" defaultOpen>
-        <div className="space-y-4">
-          <RangeField
-            label="Direction"
-            max={180}
-            min={-180}
-            step={1}
-            value={directionDeg}
-            onChange={(value) => onChange({ ...node, direction_deg: clampDegrees(value) })}
-          />
-          <div className="grid gap-3 sm:grid-cols-2">
-            <RangeField label="Min speed" max={900} min={0} step={1} value={minSpeed} onChange={(value) => onChange({ ...node, min_speed: value })} />
-            <RangeField label="Max speed" max={1200} min={0} step={1} value={maxSpeed} onChange={(value) => onChange({ ...node, max_speed: Math.max(value, minSpeed) })} />
-          </div>
-          <RangeField label="Spread" max={180} min={0} step={1} value={node.spread} onChange={(value) => onChange({ ...node, spread: value })} />
-          <div className="grid gap-3 sm:grid-cols-2">
-            <RangeField label="Gravity X" max={320} min={-320} step={1} value={node.gravity_x} onChange={(value) => onChange({ ...node, gravity_x: value })} />
-            <RangeField label="Gravity Y" max={320} min={-320} step={1} value={node.gravity_y} onChange={(value) => onChange({ ...node, gravity_y: value })} />
-          </div>
-          <RangeField label="Drag" max={8} min={0} step={0.05} value={node.drag} onChange={(value) => onChange({ ...node, drag: value })} />
-        </div>
-      </ComposerSection>
-      <ComposerSection title="Curves">
-        <div className="space-y-4">
-          <div className="surface-muted p-3 text-sm text-slate-300">
-            Use the dedicated particle editor for curve shaping and live particle preview. The inline inspector keeps only the core emitter controls.
-          </div>
-          <button
-            className="secondary-button w-full justify-center"
-            onClick={() => onOpenParticleEditor(node.id)}
-            type="button"
-          >
-            <FiSliders className="size-4" />
-            Open particle editor
-          </button>
-          <div className="grid gap-3 sm:grid-cols-3">
-            <CurveSummaryCard label="Size" points={sizeCurve.length} />
-            <CurveSummaryCard label="Alpha" points={alphaCurve.length} />
-            <CurveSummaryCard label="Color" points={colorCurve.length} />
+            <RangeField label="Origin X" max={100} min={0} step={1} value={originX * 100} onChange={(value) => onChange({ ...node, origin_x: value / 100 })} />
+            <RangeField label="Origin Y" max={100} min={0} step={1} value={originY * 100} onChange={(value) => onChange({ ...node, origin_y: value / 100 })} />
           </div>
         </div>
       </ComposerSection>
@@ -5046,12 +4333,14 @@ function CurveSummaryCard({ label, points }: { label: string; points: number }) 
 
 function ParticleEditorModal({
   availableImageKeys,
+  baseImageUrl,
   documentVisible,
   node,
   onClose,
   onSave,
 }: {
   availableImageKeys: Array<{ key: string; label: string }>
+  baseImageUrl: string | null
   documentVisible: boolean
   node: Extract<SceneNode, { kind: 'emitter' }>
   onClose: () => void
@@ -5061,12 +4350,21 @@ function ParticleEditorModal({
   const [sizePoints, setSizePoints] = useState(() => toEditableScalarPoints(resolveScalarCurve(node.size_curve, defaultEmitterSizeCurve(node.preset))))
   const [alphaPoints, setAlphaPoints] = useState(() => toEditableScalarPoints(resolveScalarCurve(node.alpha_curve, defaultEmitterAlphaCurve(node.preset))))
   const [colorStops, setColorStops] = useState(() => toEditableColorStops(resolveColorCurve(node.color_curve, defaultEmitterColorCurve(node.preset))))
+  const [showBaseImage, setShowBaseImage] = useState(false)
 
   useEffect(() => {
-    setDraft(node)
-    setSizePoints(toEditableScalarPoints(resolveScalarCurve(node.size_curve, defaultEmitterSizeCurve(node.preset))))
-    setAlphaPoints(toEditableScalarPoints(resolveScalarCurve(node.alpha_curve, defaultEmitterAlphaCurve(node.preset))))
-    setColorStops(toEditableColorStops(resolveColorCurve(node.color_curve, defaultEmitterColorCurve(node.preset))))
+    // Sync spatial fields that can change via viewport handles while modal is open
+    setDraft((prev) => ({
+      ...prev,
+      origin_x: node.origin_x,
+      origin_y: node.origin_y,
+      shape: node.shape,
+      region_width: node.region_width,
+      region_height: node.region_height,
+      region_radius: node.region_radius,
+      line_length: node.line_length,
+      line_angle_deg: node.line_angle_deg,
+    }))
   }, [node])
 
   const previewNode: SceneEmitterNode = {
@@ -5076,65 +4374,126 @@ function ParticleEditorModal({
     color_curve: fromEditableColorStops(colorStops),
   }
 
+  const colorHex = resolveEmitterColorHex(draft)
+  const particleImageKey = resolveEmitterParticleImageKey(draft)
+
   return (
     <div className="absolute inset-0 z-20 flex items-center justify-center bg-slate-950/82 p-6 backdrop-blur-sm">
       <div className="surface-panel flex h-full w-full max-w-[1200px] flex-col overflow-hidden">
         <div className="flex items-center justify-between border-b border-white/10 px-5 py-4">
           <div>
             <div className="section-title">Particle Editor</div>
-            <div className="mt-1 text-sm text-slate-400">Tune particle curves and preview emitter behavior without fighting the main composer inspector.</div>
+            <div className="mt-0.5 text-sm font-medium text-white">{draft.name} · {draft.preset}</div>
           </div>
           <div className="flex items-center gap-3">
+            {baseImageUrl ? (
+              <button
+                className={['secondary-button', showBaseImage ? 'border-cyan-300/40 text-cyan-100' : ''].join(' ')}
+                onClick={() => setShowBaseImage((v) => !v)}
+                type="button"
+              >
+                <FiImage className="size-4" />
+                {showBaseImage ? 'Hide background' : 'Show background'}
+              </button>
+            ) : null}
             <button className="secondary-button" onClick={onClose} type="button">Cancel</button>
             <button className="primary-button" onClick={() => onSave(previewNode)} type="button">
               <FiDisc className="size-4" />
-              Apply particle changes
+              Apply
             </button>
           </div>
         </div>
         <div className="grid min-h-0 flex-1 gap-0 xl:grid-cols-[1.1fr_0.9fr]">
           <div className="flex min-h-0 flex-col border-r border-white/10">
-            <div className="border-b border-white/10 px-5 py-4">
-              <div className="text-sm font-medium text-white">{draft.name}</div>
-              <div className="mt-1 text-xs uppercase tracking-[0.16em] text-slate-400">{draft.preset} emitter</div>
-            </div>
             <div className="min-h-0 flex-1 p-5">
               <ParticlePreviewPanel
+                baseImageUrl={baseImageUrl}
                 documentVisible={documentVisible}
                 node={previewNode}
+                showBaseImage={showBaseImage}
               />
             </div>
           </div>
           <div className="min-h-0 overflow-y-auto p-5">
             <div className="space-y-4">
-              <ComposerSection title="Emitter" defaultOpen>
-                <div className="grid gap-3 sm:grid-cols-2">
-                  <RangeField label="Min speed" max={900} min={0} step={1} value={resolveEmitterMinSpeed(draft)} onChange={(value) => setDraft((current) => ({ ...current, min_speed: value }))} />
-                  <RangeField label="Max speed" max={1200} min={0} step={1} value={resolveEmitterMaxSpeed(draft)} onChange={(value) => setDraft((current) => ({ ...current, max_speed: Math.max(value, resolveEmitterMinSpeed(current)) }))} />
-                  <RangeField label="Min lifetime" max={12} min={0.2} step={0.1} value={resolveEmitterMinLife(draft)} onChange={(value) => setDraft((current) => ({ ...current, min_life: value }))} />
-                  <RangeField label="Max lifetime" max={16} min={0.2} step={0.1} value={resolveEmitterMaxLife(draft)} onChange={(value) => setDraft((current) => ({ ...current, max_life: Math.max(value, resolveEmitterMinLife(current)) }))} />
-                </div>
-                <div>
-                  <div className="mb-2 text-xs uppercase tracking-[0.18em] text-slate-400">Particle image</div>
-                  <div className="grid gap-2">
-                    <button
-                      className={['secondary-button justify-center', resolveEmitterParticleImageKey(draft) === null ? 'border-cyan-300/40 text-cyan-100' : ''].join(' ')}
-                      onClick={() => setDraft((current) => ({ ...current, particle_image_key: null }))}
-                      type="button"
-                    >
-                      Procedural particle
-                    </button>
-                    {availableImageKeys.filter((image) => image.key !== 'base').map((image) => (
+              <ComposerSection title="Appearance" defaultOpen>
+                <div className="space-y-4">
+                  <label className="block">
+                    <div className="mb-2 flex items-center justify-between text-xs uppercase tracking-[0.16em] text-slate-400">
+                      <span>Tint</span>
+                      <span>{colorHex}</span>
+                    </div>
+                    <input
+                      className="h-10 w-full border border-white/10 bg-transparent p-1"
+                      type="color"
+                      value={colorHex}
+                      onChange={(event) => setDraft((c) => ({ ...c, color_hex: event.currentTarget.value }))}
+                    />
+                  </label>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <RangeField label="Particle size" max={12} min={1} step={0.1} value={draft.size} onChange={(v) => setDraft((c) => ({ ...c, size: v }))} />
+                    <RangeField label="Rotation" max={180} min={-180} step={1} value={resolveEmitterParticleRotationDeg(draft)} onChange={(v) => setDraft((c) => ({ ...c, particle_rotation_deg: clampDegrees(v) }))} />
+                  </div>
+                  <RangeField label="Opacity" max={1} min={0} step={0.01} value={draft.opacity} onChange={(v) => setDraft((c) => ({ ...c, opacity: v }))} />
+                  <div>
+                    <div className="mb-2 text-xs uppercase tracking-[0.18em] text-slate-400">Particle image</div>
+                    <div className="grid gap-2">
                       <button
-                        key={image.key}
-                        className={['secondary-button justify-center', resolveEmitterParticleImageKey(draft) === image.key ? 'border-cyan-300/40 text-cyan-100' : ''].join(' ')}
-                        onClick={() => setDraft((current) => ({ ...current, particle_image_key: image.key }))}
+                        className={['secondary-button justify-center', particleImageKey === null ? 'border-cyan-300/40 text-cyan-100' : ''].join(' ')}
+                        onClick={() => setDraft((c) => ({ ...c, particle_image_key: null }))}
                         type="button"
                       >
-                        {image.label}
+                        Procedural
                       </button>
-                    ))}
+                      {availableImageKeys.filter((img) => img.key !== 'base').map((img) => (
+                        <button
+                          key={img.key}
+                          className={['secondary-button justify-center', particleImageKey === img.key ? 'border-cyan-300/40 text-cyan-100' : ''].join(' ')}
+                          onClick={() => setDraft((c) => ({ ...c, particle_image_key: img.key }))}
+                          type="button"
+                        >
+                          {img.label}
+                        </button>
+                      ))}
+                    </div>
                   </div>
+                </div>
+              </ComposerSection>
+              <ComposerSection title="Emission" defaultOpen>
+                <div className="space-y-4">
+                  <RangeField label="Emission rate" max={160} min={1} step={1} value={draft.emission_rate} onChange={(v) => setDraft((c) => ({ ...c, emission_rate: v }))} />
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <RangeField label="Min lifetime" max={12} min={0.2} step={0.1} value={resolveEmitterMinLife(draft)} onChange={(v) => setDraft((c) => ({ ...c, min_life: v }))} />
+                    <RangeField label="Max lifetime" max={16} min={0.2} step={0.1} value={resolveEmitterMaxLife(draft)} onChange={(v) => setDraft((c) => ({ ...c, max_life: Math.max(v, resolveEmitterMinLife(c)) }))} />
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <RangeField label="Burst count" max={128} min={0} step={1} value={draft.burst_count} onChange={(v) => setDraft((c) => ({ ...c, burst_count: v }))} />
+                    <RangeField label="Max particles" max={600} min={8} step={1} value={draft.max_particles} onChange={(v) => setDraft((c) => ({ ...c, max_particles: v }))} />
+                  </div>
+                  <label className="flex items-center justify-between gap-3 text-sm text-slate-300">
+                    <span>Burst on start</span>
+                    <input
+                      checked={draft.burst_on_start}
+                      className="size-4 accent-emerald-300"
+                      onChange={(e) => setDraft((c) => ({ ...c, burst_on_start: e.currentTarget.checked }))}
+                      type="checkbox"
+                    />
+                  </label>
+                </div>
+              </ComposerSection>
+              <ComposerSection title="Motion" defaultOpen>
+                <div className="space-y-4">
+                  <RangeField label="Direction" max={180} min={-180} step={1} value={resolveEmitterDirectionDeg(draft)} onChange={(v) => setDraft((c) => ({ ...c, direction_deg: clampDegrees(v) }))} />
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <RangeField label="Min speed" max={900} min={0} step={1} value={resolveEmitterMinSpeed(draft)} onChange={(v) => setDraft((c) => ({ ...c, min_speed: v }))} />
+                    <RangeField label="Max speed" max={1200} min={0} step={1} value={resolveEmitterMaxSpeed(draft)} onChange={(v) => setDraft((c) => ({ ...c, max_speed: Math.max(v, resolveEmitterMinSpeed(c)) }))} />
+                  </div>
+                  <RangeField label="Spread" max={180} min={0} step={1} value={draft.spread} onChange={(v) => setDraft((c) => ({ ...c, spread: v }))} />
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <RangeField label="Gravity X" max={320} min={-320} step={1} value={draft.gravity_x} onChange={(v) => setDraft((c) => ({ ...c, gravity_x: v }))} />
+                    <RangeField label="Gravity Y" max={320} min={-320} step={1} value={draft.gravity_y} onChange={(v) => setDraft((c) => ({ ...c, gravity_y: v }))} />
+                  </div>
+                  <RangeField label="Drag" max={8} min={0} step={0.05} value={draft.drag} onChange={(v) => setDraft((c) => ({ ...c, drag: v }))} />
                 </div>
               </ComposerSection>
               <ScalarCurveModalEditor curve={sizePoints} label="Size over lifetime" maxY={2} onChange={setSizePoints} />
@@ -5149,63 +4508,65 @@ function ParticleEditorModal({
 }
 
 function ParticlePreviewPanel({
+  baseImageUrl,
   documentVisible,
   node,
+  showBaseImage,
 }: {
+  baseImageUrl: string | null
   documentVisible: boolean
   node: Extract<SceneNode, { kind: 'emitter' }>
+  showBaseImage: boolean
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
+  const baseImageRef = useRef<HTMLImageElement | null>(null)
+
+  useEffect(() => {
+    if (!baseImageUrl) { baseImageRef.current = null; return }
+    const img = new Image()
+    img.onload = () => { baseImageRef.current = img }
+    img.src = baseImageUrl
+  }, [baseImageUrl])
+
   useEffect(() => {
     const canvas = canvasRef.current
-    if (!canvas) {
-      return
-    }
+    if (!canvas) return
     const context = canvas.getContext('2d')
-    if (!context) {
-      return
-    }
+    if (!context) return
     let frame = 0
     let disposed = false
     const frameIntervalMs = 1000 / 24
     let lastRenderedAt = 0
     const render = (now: number) => {
-      if (disposed) {
-        return
-      }
-      if (!documentVisible) {
-        frame = window.requestAnimationFrame(render)
-        return
-      }
-      if (now - lastRenderedAt < frameIntervalMs) {
-        frame = window.requestAnimationFrame(render)
-        return
-      }
+      if (disposed) return
+      if (!documentVisible) { frame = window.requestAnimationFrame(render); return }
+      if (now - lastRenderedAt < frameIntervalMs) { frame = window.requestAnimationFrame(render); return }
       lastRenderedAt = now
       if (canvas.width !== 960 || canvas.height !== 540) {
         canvas.width = 960
         canvas.height = 540
       }
       context.clearRect(0, 0, canvas.width, canvas.height)
-      const gradient = context.createLinearGradient(0, 0, canvas.width, canvas.height)
-      gradient.addColorStop(0, '#040810')
-      gradient.addColorStop(1, '#0b1522')
-      context.fillStyle = gradient
-      context.fillRect(0, 0, canvas.width, canvas.height)
-      drawPreviewGrid(context, canvas.width, canvas.height)
+      if (showBaseImage && baseImageRef.current) {
+        context.drawImage(baseImageRef.current, 0, 0, canvas.width, canvas.height)
+      } else {
+        const gradient = context.createLinearGradient(0, 0, canvas.width, canvas.height)
+        gradient.addColorStop(0, '#040810')
+        gradient.addColorStop(1, '#0b1522')
+        context.fillStyle = gradient
+        context.fillRect(0, 0, canvas.width, canvas.height)
+        drawPreviewGrid(context, canvas.width, canvas.height)
+      }
       drawComposerEmitterNode(context, new Map<string, HTMLImageElement>(), node, [], now / 1000)
       frame = window.requestAnimationFrame(render)
     }
     frame = window.requestAnimationFrame(render)
-    return () => {
-      disposed = true
-      window.cancelAnimationFrame(frame)
-    }
-  }, [documentVisible, node])
+    return () => { disposed = true; window.cancelAnimationFrame(frame) }
+  }, [documentVisible, node, showBaseImage])
 
   return (
     <div className="flex h-full flex-col gap-3">
-      <div className="text-xs uppercase tracking-[0.16em] text-slate-400">Particle preview</div>
+      <div className="text-xs uppercase tracking-[0.16em] text-slate-400">Preview</div>
       <div className="relative flex-1 overflow-hidden border border-white/10 bg-slate-950/90">
         <canvas ref={canvasRef} className="h-full w-full object-contain" width={960} height={540} />
       </div>
@@ -6277,174 +5638,4 @@ function nextPreviewSeed(seed: number) {
 
 function nextPreviewRandom(seed: number) {
   return seed / 0xffffffff
-}
-
-function assetPreviewDataUri(asset: AssetMetadata) {
-  return `data:image/svg+xml;utf8,${encodeURIComponent(assetPreviewSvg(asset))}`
-}
-
-function assetPreviewSvg(asset: AssetMetadata) {
-  switch (asset.id) {
-    case 'demo.neon-grid':
-      return `
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 160">
-          <defs>
-            <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stop-color="#07111a"/>
-              <stop offset="100%" stop-color="#0c3244"/>
-            </linearGradient>
-            <pattern id="grid" width="28" height="28" patternUnits="userSpaceOnUse">
-              <path d="M 28 0 L 0 0 0 28" fill="none" stroke="#73e7d8" stroke-opacity="0.42" stroke-width="1"/>
-            </pattern>
-          </defs>
-          <rect width="320" height="160" fill="url(#bg)"/>
-          <rect width="320" height="160" fill="url(#grid)"/>
-          <rect x="0" y="0" width="320" height="160" fill="url(#grid)" transform="skewY(-8)"/>
-          <rect width="320" height="160" fill="none" stroke="#8cf3dd" stroke-opacity="0.18"/>
-        </svg>
-      `
-    case 'demo.ember-scan':
-      return `
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 160">
-          <defs>
-            <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-              <stop offset="0%" stop-color="#140907"/>
-              <stop offset="100%" stop-color="#3b1207"/>
-            </linearGradient>
-          </defs>
-          <rect width="320" height="160" fill="url(#bg)"/>
-          <rect x="178" width="28" height="160" fill="#ff7b22" fill-opacity="0.75"/>
-          <rect x="184" width="10" height="160" fill="#ffd6ad" fill-opacity="0.92"/>
-          <g stroke="#ff9447" stroke-opacity="0.2">
-            <path d="M0 24 H320"/><path d="M0 44 H320"/><path d="M0 64 H320"/><path d="M0 84 H320"/><path d="M0 104 H320"/><path d="M0 124 H320"/>
-          </g>
-          <circle cx="160" cy="84" r="78" fill="#b93818" fill-opacity="0.08"/>
-        </svg>
-      `
-    case 'demo.tide-pulse':
-      return `
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 160">
-          <defs>
-            <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-              <stop offset="0%" stop-color="#06111d"/>
-              <stop offset="100%" stop-color="#164a73"/>
-            </linearGradient>
-          </defs>
-          <rect width="320" height="160" fill="url(#bg)"/>
-          <path d="M0 112 C40 92 70 72 110 80 C150 88 166 120 206 118 C246 116 270 78 320 58 L320 160 L0 160 Z" fill="#3786d8" fill-opacity="0.7"/>
-          <path d="M0 130 C38 120 78 96 124 102 C170 108 196 138 236 130 C276 122 292 102 320 90 L320 160 L0 160 Z" fill="#86dfff" fill-opacity="0.58"/>
-          <circle cx="88" cy="46" r="24" fill="#92e9ff" fill-opacity="0.28"/>
-        </svg>
-      `
-    case 'demo.sunset-stripes':
-      return imagePreviewSvg('cover')
-    default:
-      if (asset.kind === 'web') {
-        return `
-          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 160">
-            <defs>
-              <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-                <stop offset="0%" stop-color="#08111c"/>
-                <stop offset="100%" stop-color="#1d3555"/>
-              </linearGradient>
-            </defs>
-            <rect width="320" height="160" fill="url(#bg)"/>
-            <rect x="38" y="26" width="244" height="108" rx="12" fill="#0a1526" stroke="#9ed0ff" stroke-opacity="0.25"/>
-            <rect x="56" y="46" width="208" height="12" rx="6" fill="#7fc7ff" fill-opacity="0.45"/>
-            <rect x="56" y="68" width="156" height="10" rx="5" fill="#ffffff" fill-opacity="0.15"/>
-            <rect x="56" y="86" width="184" height="10" rx="5" fill="#ffffff" fill-opacity="0.12"/>
-            <rect x="56" y="104" width="126" height="10" rx="5" fill="#ffffff" fill-opacity="0.1"/>
-          </svg>
-        `
-      }
-      if (asset.kind === 'scene') {
-        return `
-          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 160">
-            <defs>
-              <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-                <stop offset="0%" stop-color="#140b1d"/>
-                <stop offset="100%" stop-color="#2b1d48"/>
-              </linearGradient>
-            </defs>
-            <rect width="320" height="160" fill="url(#bg)"/>
-            <circle cx="92" cy="72" r="46" fill="#9f7aea" fill-opacity="0.2"/>
-            <circle cx="198" cy="60" r="30" fill="#60a5fa" fill-opacity="0.22"/>
-            <circle cx="244" cy="108" r="38" fill="#34d399" fill-opacity="0.18"/>
-            <path d="M20 130 C80 80 140 150 200 100 C240 68 276 90 300 72" fill="none" stroke="#f8fafc" stroke-opacity="0.22" stroke-width="4"/>
-          </svg>
-        `
-      }
-      if (asset.kind === 'video') {
-        return `
-          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 160">
-            <defs>
-              <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-                <stop offset="0%" stop-color="#101418"/>
-                <stop offset="100%" stop-color="#24313b"/>
-              </linearGradient>
-            </defs>
-            <rect width="320" height="160" fill="url(#bg)"/>
-            <rect x="52" y="28" width="216" height="104" rx="14" fill="#091018" stroke="#ffffff" stroke-opacity="0.12"/>
-            <polygon points="144,64 144,96 176,80" fill="#f8fafc" fill-opacity="0.8"/>
-          </svg>
-        `
-      }
-      return `
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 160">
-          <rect width="320" height="160" fill="#0b1320"/>
-          <rect x="1" y="1" width="318" height="158" fill="none" stroke="#ffffff" stroke-opacity="0.08"/>
-        </svg>
-      `
-  }
-}
-
-function imagePreviewSvg(mode: 'cover' | 'contain' | 'center') {
-  if (mode === 'contain') {
-    return `
-      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 160">
-        <rect width="320" height="160" fill="#0a1120"/>
-        ${sunsetArtwork(32, 24, 256, 112)}
-      </svg>
-    `
-  }
-
-  if (mode === 'center') {
-    return `
-      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 160">
-        <rect width="320" height="160" fill="#0a1120"/>
-        ${sunsetArtwork(84, 40, 152, 76)}
-      </svg>
-    `
-  }
-
-  return `
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 160">
-      ${sunsetArtwork(0, 0, 320, 160)}
-    </svg>
-  `
-}
-
-function sunsetArtwork(x: number, y: number, width: number, height: number) {
-  const midX = x + width / 2
-  const midY = y + height / 2
-  return `
-    <defs>
-      <linearGradient id="sunset" x1="0" y1="0" x2="1" y2="1">
-        <stop offset="0%" stop-color="#f7efe3"/>
-        <stop offset="4%" stop-color="#f7efe3"/>
-        <stop offset="4%" stop-color="#6aa2da"/>
-        <stop offset="42%" stop-color="#2f6cae"/>
-        <stop offset="42%" stop-color="#ffffff"/>
-        <stop offset="46%" stop-color="#ffffff"/>
-        <stop offset="46%" stop-color="#ea9652"/>
-        <stop offset="96%" stop-color="#f1cf7a"/>
-        <stop offset="96%" stop-color="#f7efe3"/>
-        <stop offset="100%" stop-color="#f7efe3"/>
-      </linearGradient>
-    </defs>
-    <rect x="${x}" y="${y}" width="${width}" height="${height}" fill="url(#sunset)"/>
-    <rect x="${x}" y="${y}" width="${width}" height="${height}" fill="none" stroke="#f7efe3" stroke-width="6"/>
-    <rect x="${midX - 4}" y="${y}" width="8" height="${height}" fill="#ffffff"/>
-    <rect x="${x}" y="${midY - 4}" width="${width}" height="8" fill="#ffffff"/>
-  `
 }

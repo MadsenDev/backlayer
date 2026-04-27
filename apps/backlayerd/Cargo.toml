@@ -9,6 +9,7 @@ authors.workspace = true
 anyhow.workspace = true
 backlayer-config.workspace = true
 backlayer-hyprland.workspace = true
+backlayer-kde.workspace = true
 backlayer-renderer-image.workspace = true
 backlayer-renderer-shader.workspace = true
 backlayer-renderer-video.workspace = true

@@ -13,13 +13,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-use backlayer_hyprland::HyprlandClient;
 use backlayer_renderer_image::ImageRenderer;
 use backlayer_renderer_shader::ShaderRenderer;
 use backlayer_renderer_video::VideoRenderer;
 use backlayer_types::{
-    DaemonState, PausePolicy, RendererBackend, RendererLaunchSpec, RendererSession,
-    RendererSessionStatus, RuntimeEvent, RuntimePlan, WallpaperKind,
+    CompositorClient, DaemonState, PausePolicy, RendererBackend, RendererLaunchSpec,
+    RendererSession, RendererSessionStatus, RuntimeEvent, RuntimePlan, WallpaperKind,
 };
 use backlayer_wayland::{BootstrapStatus, LayerShellRuntime};
 use tracing::info;
@@ -37,6 +36,7 @@ pub struct RuntimeCoordinator {
 
 pub struct RuntimeManager {
     coordinator: RuntimeCoordinator,
+    compositor: Arc<dyn CompositorClient>,
     workers: Vec<RuntimeWorker>,
     status_map: Arc<Mutex<HashMap<String, RendererSessionStatus>>>,
     event_log: Arc<Mutex<VecDeque<RuntimeEvent>>>,
@@ -227,9 +227,11 @@ impl RuntimeManager {
         image: ImageRenderer,
         shader: ShaderRenderer,
         video: VideoRenderer,
+        compositor: Arc<dyn CompositorClient>,
     ) -> Self {
         Self {
             coordinator: RuntimeCoordinator::new(wayland, image, shader, video),
+            compositor,
             workers: Vec::new(),
             status_map: Arc::new(Mutex::new(HashMap::new())),
             event_log: Arc::new(Mutex::new(VecDeque::new())),
@@ -354,6 +356,7 @@ impl RuntimeManager {
                 let wayland = self.coordinator.wayland.clone();
                 let image = self.coordinator.image.clone();
                 let shader = self.coordinator.shader.clone();
+                let compositor = self.compositor.clone();
                 let status_map = self.status_map.clone();
                 let event_log = self.event_log.clone();
                 let crash_flags = self.crash_flags.clone();
@@ -377,6 +380,7 @@ impl RuntimeManager {
                                 &wayland,
                                 &image,
                                 &shader,
+                                &compositor,
                                 &stop_thread,
                                 &status_map,
                                 &event_log,
@@ -422,6 +426,7 @@ impl RuntimeManager {
                 let stop_thread = stop.clone();
                 let wayland = self.coordinator.wayland.clone();
                 let image = self.coordinator.image.clone();
+                let compositor = self.compositor.clone();
                 let status_map = self.status_map.clone();
                 let event_log = self.event_log.clone();
                 let crash_flags = self.crash_flags.clone();
@@ -445,6 +450,7 @@ impl RuntimeManager {
                                 &wayland,
                                 &image,
                                 &ShaderRenderer::default(),
+                                &compositor,
                                 &stop_thread,
                                 &status_map,
                                 &event_log,
@@ -749,7 +755,7 @@ fn start_runner_process(
             reason: format!("failed to resolve {runner_name} path"),
         })?;
 
-    if runner_path.exists() && !cfg!(debug_assertions) {
+    if runner_path.exists() {
         let mut command = Command::new(&runner_path);
         for arg in args {
             command.arg(arg);
@@ -853,13 +859,13 @@ fn idle_session(
     stop: &Arc<AtomicBool>,
     mut shader_runtime: Option<(&mut backlayer_renderer_shader::ShaderRuntime, Duration)>,
     pause: Option<&PausePolicy>,
+    compositor: &Arc<dyn CompositorClient>,
     status_map: &Arc<Mutex<HashMap<String, RendererSessionStatus>>>,
     event_log: &Arc<Mutex<VecDeque<RuntimeEvent>>>,
     crash_flags: &Arc<Mutex<HashMap<String, bool>>>,
     runtime_key: &str,
 ) -> Result<(), String> {
     let mut next_frame_at = Instant::now();
-    let hyprland = pause.map(|_| HyprlandClient::new());
     let power = pause.map(|_| PowerStateProbe::default());
     let mut paused_reason = None;
 
@@ -870,12 +876,7 @@ fn idle_session(
         if let Some((runtime, interval)) = shader_runtime.as_mut() {
             let paused_for_fullscreen = pause
                 .filter(|policy| policy.pause_on_fullscreen)
-                .is_some_and(|_| {
-                    hyprland
-                        .as_ref()
-                        .and_then(|client| client.fullscreen_active().ok())
-                        .unwrap_or(false)
-                });
+                .is_some_and(|_| compositor.fullscreen_active().unwrap_or(false));
             let paused_for_battery =
                 pause
                     .filter(|policy| policy.pause_on_battery)
@@ -1036,6 +1037,7 @@ fn supervise_session_restarts(
     wayland: &LayerShellRuntime,
     image: &ImageRenderer,
     shader: &ShaderRenderer,
+    compositor: &Arc<dyn CompositorClient>,
     stop: &Arc<AtomicBool>,
     status_map: &Arc<Mutex<HashMap<String, RendererSessionStatus>>>,
     event_log: &Arc<Mutex<VecDeque<RuntimeEvent>>>,
@@ -1052,6 +1054,7 @@ fn supervise_session_restarts(
                 stop,
                 None,
                 Some(pause),
+                compositor,
                 status_map,
                 event_log,
                 crash_flags,
@@ -1116,14 +1119,7 @@ fn supervise_session_restarts(
         );
 
         live_session = match restart_live_session(
-            spec,
-            pause,
-            wayland,
-            image,
-            shader,
-            status_map,
-            event_log,
-            runtime_key,
+            spec, pause, wayland, image, shader, status_map, event_log, runtime_key,
         ) {
             Ok(session) => {
                 restart_attempts = 0;

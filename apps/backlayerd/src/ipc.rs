@@ -13,12 +13,11 @@ use std::{
 
 use anyhow::{Context, Result};
 use backlayer_config::ConfigStore;
-use backlayer_hyprland::HyprlandClient;
 use backlayer_renderer_image::ImageRenderer;
 use backlayer_renderer_shader::ShaderRenderer;
 use backlayer_renderer_video::VideoRenderer;
 use backlayer_types::{
-    AssetMetadata, AssignmentSettings, BacklayerConfig, CreateNativeAssetRequest,
+    AssetMetadata, AssignmentSettings, BacklayerConfig, CompositorClient, CreateNativeAssetRequest,
     CreateSceneAssetRequest, DaemonRequest, DaemonResponse, DaemonState, EditableSceneAsset,
     MonitorAssignment, PausePolicy, RuntimeDependencies,
 };
@@ -27,17 +26,40 @@ use tracing::{info, warn};
 
 use crate::runtime::{RuntimeCoordinator, RuntimeManager};
 
+#[cfg(test)]
+#[derive(Debug)]
+struct MockCompositorClient {
+    monitors: Vec<backlayer_types::MonitorInfo>,
+}
+
+#[cfg(test)]
+impl CompositorClient for MockCompositorClient {
+    fn compositor_name(&self) -> &'static str {
+        "mock"
+    }
+    fn discover_monitors(
+        &self,
+    ) -> Result<Vec<backlayer_types::MonitorInfo>, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(self.monitors.clone())
+    }
+    fn fullscreen_active(&self) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(false)
+    }
+}
+
 pub fn serve_forever(
     socket_path: &Path,
     config_path: &Path,
     state: DaemonState,
     assets: Vec<AssetMetadata>,
+    compositor: Arc<dyn CompositorClient>,
 ) -> Result<()> {
     let listener = bind_listener(socket_path)?;
     listener
         .set_nonblocking(true)
         .context("failed to configure nonblocking ipc listener")?;
-    let mut server = IpcServer::new_persistent(config_path.to_path_buf(), state, assets);
+    let mut server =
+        IpcServer::new_persistent(config_path.to_path_buf(), state, assets, compositor);
     info!(path = %socket_path.display(), "daemon ipc server listening");
 
     serve_listener_until_stopped(&listener, &mut server, Arc::new(AtomicBool::new(false)))?;
@@ -59,6 +81,7 @@ pub fn serve_once(
     }
     Ok(())
 }
+
 
 fn bind_listener(socket_path: &Path) -> Result<UnixListener> {
     if let Some(parent) = socket_path.parent() {
@@ -101,7 +124,7 @@ fn serve_listener_until_stopped(
 
 struct IpcServer {
     config_store: ConfigStore,
-    hyprland: HyprlandClient,
+    compositor: Arc<dyn CompositorClient>,
     refresh_monitors_during_requests: bool,
     monitor_refresh_interval: Duration,
     last_monitor_refresh_at: Instant,
@@ -114,9 +137,12 @@ struct IpcServer {
 impl IpcServer {
     #[cfg(test)]
     fn new(config_path: PathBuf, state: DaemonState, assets: Vec<AssetMetadata>) -> Self {
+        let compositor = Arc::new(MockCompositorClient {
+            monitors: state.monitors.clone(),
+        });
         let mut server = Self {
             config_store: ConfigStore::default(),
-            hyprland: HyprlandClient::new(),
+            compositor,
             refresh_monitors_during_requests: false,
             monitor_refresh_interval: Duration::from_secs(5),
             last_monitor_refresh_at: Instant::now(),
@@ -134,10 +160,18 @@ impl IpcServer {
         config_path: PathBuf,
         state: DaemonState,
         assets: Vec<AssetMetadata>,
+        compositor: Arc<dyn CompositorClient>,
     ) -> Self {
+        let runtime_manager = RuntimeManager::new(
+            LayerShellRuntime::new(),
+            ImageRenderer::default(),
+            ShaderRenderer::default(),
+            VideoRenderer::default(),
+            compositor.clone(),
+        );
         let mut server = Self {
             config_store: ConfigStore::default(),
-            hyprland: HyprlandClient::new(),
+            compositor,
             refresh_monitors_during_requests: true,
             monitor_refresh_interval: Duration::from_secs(5),
             last_monitor_refresh_at: Instant::now()
@@ -146,12 +180,7 @@ impl IpcServer {
             config_path,
             state,
             assets,
-            runtime_manager: Some(RuntimeManager::new(
-                LayerShellRuntime::new(),
-                ImageRenderer::default(),
-                ShaderRenderer::default(),
-                VideoRenderer::default(),
-            )),
+            runtime_manager: Some(runtime_manager),
         };
         server.refresh_runtime_dependencies();
         server.refresh_runtime_plan();
@@ -281,20 +310,21 @@ impl IpcServer {
         }
         self.last_monitor_refresh_at = Instant::now();
 
-        match self.hyprland.discover_monitors() {
+        match self.compositor.discover_monitors() {
             Ok(monitors) => {
                 if monitors != self.state.monitors {
                     info!(
+                        compositor = self.compositor.compositor_name(),
                         old_count = self.state.monitors.len(),
                         new_count = monitors.len(),
-                        "hyprland monitor set changed; refreshing runtime"
+                        "monitor set changed; refreshing runtime"
                     );
                     self.state.monitors = monitors;
                     self.refresh_runtime_plan();
                 }
             }
             Err(error) => {
-                warn!(%error, "failed to refresh hyprland monitors");
+                warn!(%error, "failed to refresh monitors");
             }
         }
     }
@@ -534,6 +564,7 @@ impl IpcServer {
         };
     }
 
+
     fn refresh_assignment_assets(&mut self) {
         for assignment in &mut self.state.assignments {
             if let Some(asset) = self
@@ -584,7 +615,7 @@ mod tests {
         RuntimeDependencies, RuntimePlan, WallpaperKind,
     };
 
-    use super::{IpcServer, bind_listener, serve_listener_until_stopped, serve_once};
+    use super::{IpcServer, MockCompositorClient, bind_listener, serve_listener_until_stopped, serve_once};
 
     #[test]
     fn ipc_server_returns_state_response() {
@@ -709,8 +740,15 @@ mod tests {
         let server_shutdown = shutdown.clone();
 
         let handle = thread::spawn(move || {
-            let mut server =
-                IpcServer::new_persistent(config_path, sample_state(), vec![sample_asset()]);
+            let compositor = Arc::new(MockCompositorClient {
+                monitors: sample_state().monitors,
+            });
+            let mut server = IpcServer::new_persistent(
+                config_path,
+                sample_state(),
+                vec![sample_asset()],
+                compositor,
+            );
             serve_listener_until_stopped(&listener, &mut server, server_shutdown)
                 .expect("persistent server should run");
         });

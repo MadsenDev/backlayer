@@ -5,19 +5,19 @@ export default {
   theme: {
     extend: {
       colors: {
-        ink: '#070b11',
-        mist: '#95a3ba',
-        line: 'rgba(255,255,255,0.08)',
-        accent: '#6ef2c8',
-        panel: '#0d1524',
-        panelAlt: '#121d31',
+        ink: '#1c1916',
+        mist: '#7a746e',
+        line: 'rgba(28,22,18,0.08)',
+        accent: '#8b5e3c',
+        panel: '#ffffff',
+        panelAlt: '#f8f5f1',
       },
       boxShadow: {
-        chrome: '0 24px 80px rgba(0, 0, 0, 0.45)',
+        chrome: '0 4px 16px rgba(28, 22, 18, 0.08)',
       },
       backgroundImage: {
         atmos:
-          'radial-gradient(circle at top, rgba(95, 157, 255, 0.18), transparent 28%), radial-gradient(circle at 80% 20%, rgba(110, 242, 200, 0.1), transparent 24%), linear-gradient(180deg, #0b0f16 0%, #05070a 100%)',
+          'radial-gradient(circle at top, rgba(139, 94, 60, 0.12), transparent 28%), radial-gradient(circle at 80% 20%, rgba(196, 133, 90, 0.08), transparent 24%), linear-gradient(180deg, #f2ede7 0%, #ece7e0 100%)',
       },
       fontFamily: {
         sans: ['Segoe UI', 'SF Pro Text', 'Inter', 'Avenir Next', 'sans-serif'],
