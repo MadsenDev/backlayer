@@ -31,6 +31,7 @@ The format is intentionally simple for now and follows an `Unreleased` section p
 - Scene Composer particle occluder/surface sprites can now use a custom drawn region instead of full sprite bounds
 - Scene Composer can now place occluder and landing regions directly on the scene without needing a sprite node
 - Standalone particle areas can now be authored as polygons for more useful collider and occluder shapes
+- Known limitations docs now explicitly call out KDE Plasma's tendency to keep wallpaper ownership and show only static fallback previews outside the Hyprland MVP scope
 
 ### Fixed
 
