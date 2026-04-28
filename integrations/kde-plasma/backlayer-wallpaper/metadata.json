@@ -1,0 +1,19 @@
+{
+  "KPackageStructure": "Plasma/Wallpaper",
+  "X-Plasma-API-Minimum-Version": "6.0",
+  "KPlugin": {
+    "Id": "dev.madsens.backlayer.wallpaper",
+    "Name": "Backlayer",
+    "Description": "Native Backlayer animated wallpaper bridge for KDE Plasma",
+    "Icon": "preferences-desktop-wallpaper",
+    "Version": "0.1.0",
+    "Category": "Utilities",
+    "EnabledByDefault": true,
+    "License": "GPL-3.0-or-later",
+    "Authors": [
+      {
+        "Name": "Christoffer Madsen"
+      }
+    ]
+  }
+}

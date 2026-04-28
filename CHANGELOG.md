@@ -8,6 +8,7 @@ The format is intentionally simple for now and follows an `Unreleased` section p
 
 ### Added
 
+- KDE Plasma 6 wallpaper bridge foundation under `integrations/kde-plasma` with a real Plasma wallpaper plugin package, install script, and animated placeholder `main.qml`
 - Built-in `demo.prism-loop` native video asset for end-to-end video playback testing
 - Unified Create flow in the manager for native image, scene, shader, and video wallpapers
 - Release-facing docs for install flow, architecture, known limitations, and manual verification
@@ -20,6 +21,8 @@ The format is intentionally simple for now and follows an `Unreleased` section p
 
 ### Changed
 
+- KDE Plasma bridge foundation now uses the wallpaper-specific QML import module and safer shell-restart fallback ordering in the installer docs/script
+- Product docs now track the explicitly requested narrow KDE Plasma plugin bridge exception while preserving Hyprland-first runtime scope
 - `video-runner` now respects the daemon FPS cap plus pause-on-fullscreen and pause-on-battery policy
 - daemon/UI steady-state refresh work is now much lighter, with reduced asset polling and lower idle wakeups in shader/video/scene runners
 - `backlayerd --serve` now reconciles monitor changes in the background instead of waiting for UI request traffic

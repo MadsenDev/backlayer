@@ -153,6 +153,13 @@
 - [x] Make Scene Composer editing open immediately with progressive scene hydration
 - [x] Reduce Scene Composer and browser preview work to improve interaction responsiveness
 
+## KDE Plasma Integration
+
+- [x] Add a minimal Plasma 6 wallpaper plugin package that appears as `Backlayer` and renders an animated QML placeholder
+- [ ] Add a daemon status bridge for the Plasma wallpaper plugin via IPC or a thin `backlayerctl --json` helper
+- [ ] Add Plasma containment/screen to Backlayer monitor mapping strategy and diagnostics
+- [ ] Prototype a live-render bridge path for Plasma wallpaper surfaces without changing the Hyprland layer-shell path
+
 ## Packaging / Startup
 
 - [x] Add `systemd --user` service for daemon autostart

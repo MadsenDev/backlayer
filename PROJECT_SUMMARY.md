@@ -103,6 +103,7 @@ backlayer
 - Image runtime direction: image sessions can now decode supported image assets, upload them to the GPU, bind a Wayland layer-shell surface, and submit a real textured frame
 - Native scene direction: the manager can now create Backlayer-native `scene` assets from existing image wallpapers by saving a native scene document with sprite, effect, and particle nodes into user-managed asset storage under `~/.config/backlayer/assets`
 - Native scene runtime direction: `scene-runner` now treats native Backlayer scenes as a real-time scene graph instead of a stack of pre-rendered overlay images, with GPU-native sprite/effect rendering plus a GPU-native particle pass, and native emitters now support positioned origins, explicit shapes, burst/range controls, over-life curves, direction control, tint, plus scene-level and sprite-level particle occluders and landing surfaces with optional custom drawn regions and polygon particle areas
+- KDE Plasma bridge direction: add a Plasma 6 wallpaper plugin adapter package that first proves animated QML wallpaper execution inside Plasma wallpaper context, then layers daemon status/monitor mapping/live frame bridge work while keeping Hyprland layer-shell as the primary MVP runtime path
 
 ### Why this scope works
 
@@ -131,7 +132,7 @@ The MVP should support:
 These should stay out of scope until the runtime is stable:
 
 - Supporting all Linux desktop environments
-- KDE / GNOME / X11 compatibility
+- KDE / GNOME / X11 compatibility (except a narrow KDE Plasma wallpaper-plugin bridge foundation explicitly limited to proving plugin load + animation and later daemon bridge integration)
 - Workshop / marketplace integration
 - Wallpaper scripting engines
 - Full creator-grade editor tooling
