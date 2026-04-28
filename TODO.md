@@ -180,6 +180,7 @@
 - [x] Document `systemd --user` supervision for daemon crash recovery
 - [x] Document known limitations of the Hyprland-only MVP
 - [x] Keep `PROJECT_SUMMARY.md` aligned with implementation reality
+- [ ] Add compositor-level troubleshooting notes for unsupported desktop environments (for example KDE showing static fallback previews)
 
 ## Release Readiness
 

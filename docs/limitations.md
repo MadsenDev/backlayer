@@ -6,6 +6,7 @@ These are the important current MVP limitations, not aspirational future ideas.
 
 - Backlayer is Hyprland-only for the current MVP.
 - KDE, GNOME, X11, and non-wlroots environments are out of scope right now.
+- On KDE Plasma Wayland specifically, Backlayer can appear to "work" while Plasma keeps ownership of wallpaper composition and only shows a static preview/fallback image instead of the live surface.
 
 ## Video
 
