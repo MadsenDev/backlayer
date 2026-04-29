@@ -73,7 +73,8 @@ jobs:
                 pnpm \
                 rust \
                 wayland \
-                webkit2gtk-4.1
+                webkit2gtk-4.1 \
+                zstd
               useradd -m builder
               chown -R builder:builder /work
               su builder -c "

@@ -17,6 +17,7 @@ pkgbase = backlayer
 	depends = libxkbcommon
 	depends = wayland
 	depends = webkit2gtk-4.1
+	depends = zstd
 	optdepends = hyprland: wlroots layer-shell wallpaper runtime
 	optdepends = plasma-desktop: KDE Plasma wallpaper plugin integration
 	source = https://github.com/MadsenDev/backlayer/releases/download/v0.2.0/backlayer-0.2.0-source.tar.gz
