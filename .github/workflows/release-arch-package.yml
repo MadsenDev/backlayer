@@ -4,6 +4,11 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to build and upload assets for
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -23,6 +28,9 @@ jobs:
         run: |
           if [[ "${GITHUB_EVENT_NAME}" == "release" ]]; then
             tag="${{ github.event.release.tag_name }}"
+            git_ref="${tag}"
+          elif [[ -n "${{ github.event.inputs.tag || '' }}" ]]; then
+            tag="${{ github.event.inputs.tag }}"
             git_ref="${tag}"
           else
             latest_tag="$(git describe --tags --abbrev=0 2>/dev/null || true)"
@@ -51,7 +59,21 @@ jobs:
             archlinux:latest \
             bash -lc '
               set -euo pipefail
-              pacman -Syu --noconfirm --needed base-devel desktop-file-utils git nodejs pnpm rust webkit2gtk-4.1 gtk3 libsoup3
+              pacman -Sy --noconfirm archlinux-keyring
+              pacman -Syu --noconfirm --needed \
+                base-devel \
+                desktop-file-utils \
+                ffmpeg \
+                git \
+                hicolor-icon-theme \
+                gtk3 \
+                libsoup3 \
+                libxkbcommon \
+                nodejs \
+                pnpm \
+                rust \
+                wayland \
+                webkit2gtk-4.1
               useradd -m builder
               chown -R builder:builder /work
               su builder -c "
@@ -60,7 +82,7 @@ jobs:
                 cd /work/packaging/aur/backlayer-git &&
                 makepkg --printsrcinfo > .SRCINFO &&
                 cd /work/packaging/arch &&
-                makepkg -f --noconfirm -p PKGBUILD
+                makepkg -f --noconfirm --nodeps -p PKGBUILD
               "
             '
 
@@ -86,9 +108,10 @@ jobs:
             packaging/aur/backlayer-git/.SRCINFO
 
       - name: Upload assets to GitHub Release
-        if: github.event_name == 'release'
+        if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.version.outputs.tag }}
           files: |
             dist/release/backlayer-*-source.tar.gz
             dist/release/backlayer-*-source.tar.gz.sha256
