@@ -4322,15 +4322,6 @@ function RangeField({
   )
 }
 
-function CurveSummaryCard({ label, points }: { label: string; points: number }) {
-  return (
-    <div className="surface-muted p-3">
-      <div className="text-xs uppercase tracking-[0.16em] text-slate-400">{label}</div>
-      <div className="mt-1 text-sm font-medium text-slate-100">{points} control points</div>
-    </div>
-  )
-}
-
 function ParticleEditorModal({
   availableImageKeys,
   baseImageUrl,
