@@ -59,6 +59,7 @@ jobs:
             archlinux:latest \
             bash -lc '
               set -euo pipefail
+              host_owner="$(stat -c "%u:%g" /work)"
               pacman -Sy --noconfirm archlinux-keyring
               pacman -Syu --noconfirm --needed \
                 base-devel \
@@ -84,6 +85,7 @@ jobs:
                 cd /work/packaging/arch &&
                 makepkg -f --noconfirm --nodeps -p PKGBUILD
               "
+              chown -R "${host_owner}" /work
             '
 
       - name: Write checksum files
