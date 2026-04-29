@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Backlayer
+Comment=Animated wallpaper manager
+Exec=backlayer-ui
+Icon=backlayer
+Terminal=false
+Categories=Graphics;Settings;
+StartupWMClass=Backlayer

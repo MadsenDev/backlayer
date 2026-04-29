@@ -6,6 +6,10 @@ The repo includes a service file at:
 
 `packaging/systemd/backlayerd.service`
 
+For Arch-style packaged installs, the package installs:
+
+`/usr/lib/systemd/user/backlayerd.service`
+
 ## Expected install path
 
 The unit assumes the daemon binary is installed at:
@@ -13,6 +17,10 @@ The unit assumes the daemon binary is installed at:
 `~/.local/bin/backlayerd`
 
 If you install it somewhere else, edit `ExecStart` before enabling the service.
+
+For the Arch package, the installed unit already points to:
+
+`/usr/bin/backlayerd`
 
 ## Install
 
@@ -35,3 +43,4 @@ journalctl --user -u backlayerd.service -f
 - Renderer/session failures should be handled inside `backlayerd` when possible.
 - If `backlayerd` itself crashes, `systemd --user` should restart it automatically.
 - The manager UI should reconnect on its own once the socket comes back.
+- If the service is not enabled, the packaged Tauri app can still spawn `backlayerd --serve` on demand when it starts and the socket is missing.

@@ -1,17 +1,23 @@
-# Backlayer KDE Plasma 6 Wallpaper Bridge (Foundation)
+# Backlayer KDE Plasma 6 Wallpaper Plugin
 
 This integration adds a Plasma 6 wallpaper plugin package that appears in the wallpaper type selector as **Backlayer**.
 
-## Current milestone (Milestone 1)
+## Current behavior
 
-This first bridge PR intentionally proves only the plugin/runtime foundation:
+The plugin is already usable on Plasma 6 and can render Backlayer wallpapers directly inside Plasma wallpaper context.
 
 - Plugin installs to the Plasma wallpapers package path.
 - Plugin appears as a wallpaper type named **Backlayer**.
-- Plugin runs in wallpaper context and renders animated QML content.
-- No daemon IPC, monitor mapping, or frame streaming is wired yet.
+- Plugin reads `~/.config/backlayer/config.toml` on a timer and applies the current assigned wallpaper.
+- Plugin renders:
+  - `image` wallpapers
+  - `video` wallpapers through `QtMultimedia`
+  - a simplified native `scene` path with sprite, glow, and particle support in QML
+- Plugin currently does not render:
+  - `shader` wallpapers
+  - `web` wallpapers
 
-The goal is to prove the desktop integration point before adding transport and renderer bridge complexity.
+This is still a Plasma-specific adapter, not a full reuse of the Hyprland layer-shell runtime.
 
 ## Layout
 
@@ -50,7 +56,8 @@ If **Backlayer** does not appear immediately, restart Plasma Shell or log out/in
 2. Open wallpaper type selector.
 3. Confirm **Backlayer** appears.
 4. Select **Backlayer** and apply.
-5. Confirm animated placeholder visuals are visible on desktop background.
+5. Assign a Backlayer wallpaper through the normal Backlayer config/UI flow.
+6. Confirm the selected wallpaper renders on the Plasma desktop.
 
 ## Plasma 6 packaging notes
 
@@ -58,6 +65,21 @@ If **Backlayer** does not appear immediately, restart Plasma Shell or log out/in
 - Uses `KPackageStructure: Plasma/Wallpaper`.
 - Uses `X-Plasma-API-Minimum-Version: 6.0`.
 - Uses root `contents/ui/main.qml` wallpaper script entry.
+
+## Current implementation notes
+
+- The plugin polls `~/.config/backlayer/config.toml` every 5 seconds.
+- It parses the assigned wallpaper kind and entrypoint from the config file.
+- `scene` wallpapers are rendered through a simplified QML scene path, not the Rust `scene-runner`.
+- The current plugin path does not yet use daemon IPC, shared-memory frame transport, or Plasma-aware monitor assignment.
+
+## Current limitations
+
+- The config read path is file-based and polling-based.
+- Per-monitor mapping is not Plasma-native yet.
+- `scene` support is partial compared with the main native runtime.
+- `shader` and `web` wallpapers still fall back to an unsupported status message in the plugin.
+- The plugin currently assumes a readable local Backlayer config under `~/.config/backlayer/config.toml`.
 
 ## Next milestones
 
@@ -87,7 +109,7 @@ If **Backlayer** does not appear immediately, restart Plasma Shell or log out/in
 - Likely repeats current KDE static/preview behavior and fails to establish true wallpaper composition path.
 - Not sufficient as final bridge.
 
-## Non-goals in this foundation step
+## Non-goals for this plugin path
 
 - No rewrite of existing Hyprland layer-shell runtime.
 - No compositor-default behavior changes.

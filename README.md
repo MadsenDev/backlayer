@@ -13,6 +13,8 @@ Backlayer currently targets:
 - native `image`, `shader`, and `scene` wallpapers
 - a Tauri manager UI
 
+There is also an experimental but working KDE Plasma 6 wallpaper plugin integration under `integrations/kde-plasma` for users who want to run Backlayer through Plasma's native wallpaper system.
+
 Workshop compatibility exists behind `BACKLAYER_ENABLE_WORKSHOP=1`, but native support remains the primary direction.
 
 ## What Works Now
@@ -34,6 +36,7 @@ Workshop compatibility exists behind `BACKLAYER_ENABLE_WORKSHOP=1`, but native s
 - Native wallpapers stored as single-file `.backlayer` assets
 - Pause-on-fullscreen and pause-on-battery behavior
 - Renderer supervision and `systemd --user` daemon recovery support
+- KDE Plasma 6 wallpaper plugin path that can render `image`, `video`, and a simplified `scene` path when the `Backlayer` wallpaper type is selected in Plasma
 
 ## What Is Still In Progress
 
@@ -42,6 +45,7 @@ Workshop compatibility exists behind `BACKLAYER_ENABLE_WORKSHOP=1`, but native s
 - Particle image sprites in the native scene engine
 - Tighter parity between Scene Composer preview and applied wallpaper
 - Broader Workshop runtime support
+- Plasma-side monitor mapping, daemon bridge hardening, and support for `shader` / `web` wallpapers in the KDE plugin path
 
 ## Repo Layout
 
@@ -162,6 +166,7 @@ pnpm ui:build
 - [PROJECT_SUMMARY.md](PROJECT_SUMMARY.md)
 - [TODO.md](TODO.md)
 - [CHANGELOG.md](CHANGELOG.md)
+- [integrations/kde-plasma/README.md](integrations/kde-plasma/README.md)
 - [docs/install.md](docs/install.md)
 - [docs/architecture.md](docs/architecture.md)
 - [docs/limitations.md](docs/limitations.md)

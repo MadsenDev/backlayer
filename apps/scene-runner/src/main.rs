@@ -1479,10 +1479,7 @@ fn orientation(a: (f32, f32), b: (f32, f32), c: (f32, f32)) -> f32 {
 }
 
 fn on_segment(a: (f32, f32), b: (f32, f32), c: (f32, f32)) -> bool {
-    b.0 >= a.0.min(c.0)
-        && b.0 <= a.0.max(c.0)
-        && b.1 >= a.1.min(c.1)
-        && b.1 <= a.1.max(c.1)
+    b.0 >= a.0.min(c.0) && b.0 <= a.0.max(c.0) && b.1 >= a.1.min(c.1) && b.1 <= a.1.max(c.1)
 }
 
 fn segment_intersects_segment(
@@ -2038,7 +2035,12 @@ fn effect_kind_to_u32(effect: &SceneEffectKind) -> u32 {
 fn env_flag_enabled(name: &str) -> bool {
     std::env::var(name)
         .ok()
-        .map(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
         .unwrap_or(false)
 }
 
@@ -2081,20 +2083,12 @@ fn build_particle_instances(scene: &NativeSceneRuntime) -> Vec<ParticleInstance>
                     1.0,
                     0.86,
                 ),
-                SceneEmitterPreset::Dust => (
-                    base_radius * 2.2,
-                    base_radius * 2.2,
-                    render_angle,
-                    1.0,
-                    0.7,
-                ),
-                SceneEmitterPreset::Embers => (
-                    base_radius * 2.0,
-                    base_radius * 2.0,
-                    render_angle,
-                    1.0,
-                    1.0,
-                ),
+                SceneEmitterPreset::Dust => {
+                    (base_radius * 2.2, base_radius * 2.2, render_angle, 1.0, 0.7)
+                }
+                SceneEmitterPreset::Embers => {
+                    (base_radius * 2.0, base_radius * 2.0, render_angle, 1.0, 1.0)
+                }
             };
             let occluded = if matches!(emitter.preset, SceneEmitterPreset::Rain) {
                 let dx = angle.cos() * size_y * 0.5;

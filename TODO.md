@@ -165,6 +165,8 @@
 - [x] Add `systemd --user` service for daemon autostart
 - [x] Define install flow for runtime, UI, and assets
 - [x] Document runtime dependencies like `mpv`/`libmpv`
+- [x] Add an Arch/CachyOS package layout for the UI, daemon, runners, assets, Plasma plugin, and user service
+- [x] Add GitHub release artifact automation for Arch packages and AUR-ready package files
 
 ## Testing
 

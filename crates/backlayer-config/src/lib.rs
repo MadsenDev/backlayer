@@ -60,10 +60,34 @@ impl ConfigStore {
     }
 
     pub fn default_assets_path(&self) -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        if let Some(path) = env::var_os("BACKLAYER_ASSETS_DIR") {
+            return PathBuf::from(path);
+        }
+
+        let repo_assets = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .and_then(|path| path.parent())
-            .map(|path| path.join("assets"))
+            .map(|path| path.join("assets"));
+
+        let candidates = std::env::current_exe().ok().and_then(|exe| {
+            exe.parent().map(|dir| {
+                vec![
+                    dir.join("../share/backlayer/assets"),
+                    dir.join("../Resources/assets"),
+                    dir.join("assets"),
+                ]
+            })
+        });
+
+        candidates
+            .into_iter()
+            .flatten()
+            .find(|path| path.exists())
+            .or_else(|| {
+                let path = PathBuf::from("/usr/share/backlayer/assets");
+                path.exists().then_some(path)
+            })
+            .or(repo_assets)
             .unwrap_or_else(|| PathBuf::from("assets"))
     }
 
@@ -202,10 +226,9 @@ impl ConfigStore {
             if entry.file_type()?.is_dir() {
                 let metadata_path = entry.path().join("backlayer.toml");
                 if metadata_path.is_file() {
-                    assets.push(self.load_asset_metadata_from_manifest(
-                        &metadata_path,
-                        Some(entry.path()),
-                    )?);
+                    assets.push(
+                        self.load_asset_metadata_from_manifest(&metadata_path, Some(entry.path()))?,
+                    );
                 }
                 continue;
             }
@@ -285,8 +308,8 @@ impl ConfigStore {
         fs::create_dir_all(&extract_root)?;
 
         let file = fs::File::open(package_path)?;
-        let mut archive =
-            ZipArchive::new(file).map_err(|error| ConfigError::UnsupportedImportPath(error.to_string()))?;
+        let mut archive = ZipArchive::new(file)
+            .map_err(|error| ConfigError::UnsupportedImportPath(error.to_string()))?;
         for index in 0..archive.len() {
             let mut entry = archive
                 .by_index(index)
@@ -448,7 +471,9 @@ impl ConfigStore {
                 )));
             }
             remove_path_if_exists(&user_assets_root.join(existing_asset_id))?;
-            remove_path_if_exists(&user_assets_root.join(format!("{existing_asset_id}.backlayer")))?;
+            remove_path_if_exists(
+                &user_assets_root.join(format!("{existing_asset_id}.backlayer")),
+            )?;
             existing_asset_id.to_string()
         } else {
             self.allocate_scene_id(&request.name)?
@@ -606,13 +631,11 @@ impl ConfigStore {
         &self,
         asset_id: &str,
     ) -> Result<EditableSceneAsset, ConfigError> {
-        let asset_root = self
-            .find_native_asset_container(asset_id)?
-            .ok_or_else(|| {
-                ConfigError::UnsupportedImportPath(format!(
-                    "cannot edit missing native scene asset: {asset_id}"
-                ))
-            })?;
+        let asset_root = self.find_native_asset_container(asset_id)?.ok_or_else(|| {
+            ConfigError::UnsupportedImportPath(format!(
+                "cannot edit missing native scene asset: {asset_id}"
+            ))
+        })?;
         let metadata = if asset_root
             .extension()
             .and_then(|ext| ext.to_str())
@@ -620,7 +643,10 @@ impl ConfigStore {
         {
             self.load_packaged_asset_metadata(&asset_root)?
         } else {
-            self.load_asset_metadata_from_manifest(&asset_root.join("backlayer.toml"), Some(asset_root.clone()))?
+            self.load_asset_metadata_from_manifest(
+                &asset_root.join("backlayer.toml"),
+                Some(asset_root.clone()),
+            )?
         };
         if metadata.kind != WallpaperKind::Scene || metadata.source_kind != AssetSourceKind::Native
         {
@@ -906,7 +932,10 @@ fn build_root_for(asset_id: &str, prefix: &str) -> PathBuf {
             .unwrap_or_default()
             .as_nanos()
     );
-    std::env::temp_dir().join("backlayer-build").join(unique).join(asset_id)
+    std::env::temp_dir()
+        .join("backlayer-build")
+        .join(unique)
+        .join(asset_id)
 }
 
 fn remove_path_if_exists(path: &Path) -> Result<(), ConfigError> {
@@ -954,9 +983,7 @@ fn write_directory_to_zip<W: Write + Seek>(
     archive: &mut ZipWriter<W>,
     options: FileOptions,
 ) -> zip::result::ZipResult<()> {
-    for entry in fs::read_dir(current)
-        .map_err(zip::result::ZipError::Io)?
-    {
+    for entry in fs::read_dir(current).map_err(zip::result::ZipError::Io)? {
         let entry = entry.map_err(zip::result::ZipError::Io)?;
         let path = entry.path();
         let relative = path
@@ -965,7 +992,11 @@ fn write_directory_to_zip<W: Write + Seek>(
             .to_string_lossy()
             .replace('\\', "/");
 
-        if entry.file_type().map_err(zip::result::ZipError::Io)?.is_dir() {
+        if entry
+            .file_type()
+            .map_err(zip::result::ZipError::Io)?
+            .is_dir()
+        {
             archive.add_directory(format!("{relative}/"), options)?;
             write_directory_to_zip(root, &path, archive, options)?;
         } else {
@@ -1171,12 +1202,13 @@ fn sanitize_scene_nodes(nodes: &[SceneNode], images: &[SceneImageSource]) -> Vec
                 ),
             })),
             SceneNode::ParticleArea(area) => {
-                let region = sanitize_scene_rect(Some(&area.region)).unwrap_or(SceneNormalizedRect {
-                    x: 0.25,
-                    y: 0.25,
-                    width: 0.5,
-                    height: 0.25,
-                });
+                let region =
+                    sanitize_scene_rect(Some(&area.region)).unwrap_or(SceneNormalizedRect {
+                        x: 0.25,
+                        y: 0.25,
+                        width: 0.5,
+                        height: 0.25,
+                    });
                 sanitized.push(SceneNode::ParticleArea(SceneParticleAreaNode {
                     id: if area.id.trim().is_empty() {
                         format!("particle-area-{}", sanitized.len() + 1)
@@ -1189,11 +1221,7 @@ fn sanitize_scene_nodes(nodes: &[SceneNode], images: &[SceneImageSource]) -> Vec
                         area.name.trim().to_string()
                     },
                     enabled: area.enabled,
-                    shape: Some(
-                        area.shape
-                            .clone()
-                            .unwrap_or(SceneParticleAreaShape::Rect),
-                    ),
+                    shape: Some(area.shape.clone().unwrap_or(SceneParticleAreaShape::Rect)),
                     region,
                     points: sanitize_scene_points(&area.points),
                     occluder: area.occluder,
@@ -2558,11 +2586,11 @@ mod tests {
     use super::ConfigStore;
 
     const PNG_1X1_RGBA: &[u8] = &[
-        0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, b'I', b'H',
-        b'D', b'R', 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
-        0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, b'I', b'D', b'A', b'T', 0x78,
-        0x9C, 0x63, 0xF8, 0xCF, 0xC0, 0xF0, 0x1F, 0x00, 0x05, 0x00, 0x01, 0xFF, 0x89, 0x99,
-        0x3D, 0x1D, 0x00, 0x00, 0x00, 0x00, b'I', b'E', b'N', b'D', 0xAE, 0x42, 0x60, 0x82,
+        0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, b'I', b'H', b'D',
+        b'R', 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
+        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, b'I', b'D', b'A', b'T', 0x78, 0x9C, 0x63, 0xF8,
+        0xCF, 0xC0, 0xF0, 0x1F, 0x00, 0x05, 0x00, 0x01, 0xFF, 0x89, 0x99, 0x3D, 0x1D, 0x00, 0x00,
+        0x00, 0x00, b'I', b'E', b'N', b'D', 0xAE, 0x42, 0x60, 0x82,
     ];
 
     fn env_lock() -> &'static Mutex<()> {
@@ -2622,7 +2650,9 @@ mod tests {
 
     #[test]
     fn resolves_tilde_prefixed_paths() {
-        let _guard = env_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let store = ConfigStore;
         let home = std::env::var("HOME").expect("HOME should exist in tests");
 
@@ -2655,7 +2685,9 @@ mod tests {
 
     #[test]
     fn imports_wallpaper_engine_web_item() {
-        let _guard = env_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let store = ConfigStore;
         let root = temp_fixture_dir("backlayer-import-web");
         let item = root.join("123");
@@ -2692,7 +2724,9 @@ mod tests {
 
     #[test]
     fn imports_workshop_root_with_multiple_items() {
-        let _guard = env_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let store = ConfigStore;
         let root = temp_fixture_dir("backlayer-import-root");
         let workshop_root = root.join("workshop");
@@ -2731,7 +2765,9 @@ mod tests {
 
     #[test]
     fn native_file_assets_are_packaged_as_backlayer_files() {
-        let _guard = env_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let store = ConfigStore;
         let root = temp_fixture_dir("backlayer-native-package");
         unsafe {
@@ -2748,7 +2784,8 @@ mod tests {
             .expect("native image asset should be created");
 
         assert!(
-            asset.asset_path
+            asset
+                .asset_path
                 .as_ref()
                 .is_some_and(|path| path.ends_with("image.packaged-image.backlayer"))
         );
@@ -2763,7 +2800,9 @@ mod tests {
 
     #[test]
     fn import_uses_named_preview_when_project_does_not_declare_one() {
-        let _guard = env_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let store = ConfigStore;
         let root = temp_fixture_dir("backlayer-import-named-preview");
         let item = root.join("200");
@@ -2795,7 +2834,9 @@ mod tests {
 
     #[test]
     fn import_falls_back_to_first_image_when_no_preview_name_exists() {
-        let _guard = env_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let store = ConfigStore;
         let root = temp_fixture_dir("backlayer-import-first-image");
         let item = root.join("201");
@@ -2828,7 +2869,9 @@ mod tests {
 
     #[test]
     fn creates_native_scene_v2_asset_document() {
-        let _guard = env_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let store = ConfigStore;
         let root = temp_fixture_dir("backlayer-native-scene-v2");
         unsafe {

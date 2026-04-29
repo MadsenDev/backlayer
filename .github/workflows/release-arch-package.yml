@@ -1,0 +1,100 @@
+name: Release Arch Package
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-release-assets:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release version
+        id: version
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "release" ]]; then
+            tag="${{ github.event.release.tag_name }}"
+            git_ref="${tag}"
+          else
+            latest_tag="$(git describe --tags --abbrev=0 2>/dev/null || true)"
+            if [[ -n "${latest_tag}" ]]; then
+              tag="${latest_tag}"
+              git_ref="${latest_tag}"
+            else
+              version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+              tag="v${version}"
+              git_ref="HEAD"
+            fi
+          fi
+          version="${tag#v}"
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "git_ref=${git_ref}" >> "${GITHUB_OUTPUT}"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Create release source tarball
+        run: ./packaging/release/create-source-tarball.sh "${{ steps.version.outputs.version }}" "${{ steps.version.outputs.git_ref }}" "${GITHUB_WORKSPACE}/dist/release"
+
+      - name: Render AUR files and build Arch package inside Arch Linux container
+        run: |
+          docker run --rm \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            archlinux:latest \
+            bash -lc '
+              set -euo pipefail
+              pacman -Syu --noconfirm --needed base-devel desktop-file-utils git nodejs pnpm rust webkit2gtk-4.1 gtk3 libsoup3
+              useradd -m builder
+              chown -R builder:builder /work
+              su builder -c "
+                cd /work &&
+                ./packaging/aur/render-release.sh \"${{ steps.version.outputs.version }}\" &&
+                cd /work/packaging/aur/backlayer-git &&
+                makepkg --printsrcinfo > .SRCINFO &&
+                cd /work/packaging/arch &&
+                makepkg -f --noconfirm -p PKGBUILD
+              "
+            '
+
+      - name: Write checksum files
+        run: |
+          cd packaging/arch
+          for package in ./*.pkg.tar.zst; do
+            sha256sum "${package}" > "${package}.sha256"
+          done
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: backlayer-release-assets
+          path: |
+            dist/release/backlayer-*-source.tar.gz
+            dist/release/backlayer-*-source.tar.gz.sha256
+            packaging/arch/*.pkg.tar.zst
+            packaging/arch/*.pkg.tar.zst.sha256
+            packaging/aur/backlayer/PKGBUILD
+            packaging/aur/backlayer/.SRCINFO
+            packaging/aur/backlayer-git/PKGBUILD
+            packaging/aur/backlayer-git/.SRCINFO
+
+      - name: Upload assets to GitHub Release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/release/backlayer-*-source.tar.gz
+            dist/release/backlayer-*-source.tar.gz.sha256
+            packaging/arch/*.pkg.tar.zst
+            packaging/arch/*.pkg.tar.zst.sha256
+            packaging/aur/backlayer/PKGBUILD
+            packaging/aur/backlayer/.SRCINFO
+            packaging/aur/backlayer-git/PKGBUILD
+            packaging/aur/backlayer-git/.SRCINFO

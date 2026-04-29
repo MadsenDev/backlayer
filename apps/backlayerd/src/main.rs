@@ -19,8 +19,8 @@ fn detect_compositor() -> Arc<dyn CompositorClient> {
     let desktop = std::env::var("XDG_CURRENT_DESKTOP")
         .unwrap_or_default()
         .to_lowercase();
-    let is_hyprland = desktop.contains("hyprland")
-        || std::env::var("HYPRLAND_INSTANCE_SIGNATURE").is_ok();
+    let is_hyprland =
+        desktop.contains("hyprland") || std::env::var("HYPRLAND_INSTANCE_SIGNATURE").is_ok();
     let is_kde = desktop.contains("kde") || desktop.contains("plasma");
 
     if is_hyprland {

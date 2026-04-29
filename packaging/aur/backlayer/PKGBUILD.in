@@ -1,0 +1,45 @@
+# Maintainer: Backlayer contributors
+
+pkgname=backlayer
+pkgver=@PKGVER@
+pkgrel=1
+pkgdesc="Animated wallpaper runtime for Linux with Hyprland and KDE Plasma integration"
+arch=("x86_64")
+url="https://github.com/MadsenDev/backlayer"
+license=("MIT")
+install="${pkgname}.install"
+depends=(
+  "ffmpeg"
+  "gcc-libs"
+  "glib2"
+  "hicolor-icon-theme"
+  "libxkbcommon"
+  "wayland"
+  "webkit2gtk-4.1"
+)
+makedepends=(
+  "cargo"
+  "desktop-file-utils"
+  "nodejs"
+  "pnpm"
+)
+optdepends=(
+  "hyprland: wlroots layer-shell wallpaper runtime"
+  "plasma-desktop: KDE Plasma wallpaper plugin integration"
+)
+source=(
+  "https://github.com/MadsenDev/backlayer/releases/download/v${pkgver}/backlayer-${pkgver}-source.tar.gz"
+)
+sha256sums=(
+  "@SOURCE_SHA256@"
+)
+
+build() {
+  cd "${srcdir}/backlayer-${pkgver}"
+  bash packaging/arch/build-runtime.sh "${srcdir}/backlayer-${pkgver}"
+}
+
+package() {
+  cd "${srcdir}/backlayer-${pkgver}"
+  bash packaging/arch/install-runtime.sh "${srcdir}/backlayer-${pkgver}" "${pkgdir}"
+}

@@ -82,7 +82,6 @@ pub fn serve_once(
     Ok(())
 }
 
-
 fn bind_listener(socket_path: &Path) -> Result<UnixListener> {
     if let Some(parent) = socket_path.parent() {
         fs::create_dir_all(parent)
@@ -564,7 +563,6 @@ impl IpcServer {
         };
     }
 
-
     fn refresh_assignment_assets(&mut self) {
         for assignment in &mut self.state.assignments {
             if let Some(asset) = self
@@ -615,7 +613,9 @@ mod tests {
         RuntimeDependencies, RuntimePlan, WallpaperKind,
     };
 
-    use super::{IpcServer, MockCompositorClient, bind_listener, serve_listener_until_stopped, serve_once};
+    use super::{
+        IpcServer, MockCompositorClient, bind_listener, serve_listener_until_stopped, serve_once,
+    };
 
     #[test]
     fn ipc_server_returns_state_response() {

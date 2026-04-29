@@ -765,8 +765,12 @@ fn start_runner_process(
             .stderr(Stdio::inherit())
             .spawn();
         match &result {
-            Ok(child) => info!(runner = runner_name, pid = child.id(), path = %runner_path.display(), "runner process spawned"),
-            Err(error) => info!(runner = runner_name, %error, path = %runner_path.display(), "runner process spawn failed"),
+            Ok(child) => {
+                info!(runner = runner_name, pid = child.id(), path = %runner_path.display(), "runner process spawned")
+            }
+            Err(error) => {
+                info!(runner = runner_name, %error, path = %runner_path.display(), "runner process spawn failed")
+            }
         }
         result.map_err(|error| RendererSessionStatus::Failed {
             reason: format!(
@@ -796,7 +800,11 @@ fn start_runner_process(
             .stderr(Stdio::inherit())
             .spawn();
         match &result {
-            Ok(child) => info!(runner = runner_name, pid = child.id(), "cargo runner process spawned"),
+            Ok(child) => info!(
+                runner = runner_name,
+                pid = child.id(),
+                "cargo runner process spawned"
+            ),
             Err(error) => info!(runner = runner_name, %error, "cargo runner process spawn failed"),
         }
         result.map_err(|error| RendererSessionStatus::Failed {
@@ -1128,7 +1136,14 @@ fn supervise_session_restarts(
         );
 
         live_session = match restart_live_session(
-            spec, pause, wayland, image, shader, status_map, event_log, runtime_key,
+            spec,
+            pause,
+            wayland,
+            image,
+            shader,
+            status_map,
+            event_log,
+            runtime_key,
         ) {
             Ok(session) => {
                 restart_attempts = 0;
