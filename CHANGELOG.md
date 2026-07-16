@@ -8,6 +8,7 @@ The format is intentionally simple for now and follows an `Unreleased` section p
 
 ### Added
 
+- Project landing page for GitHub Pages under `site/` (self-contained static HTML) with a `Deploy GitHub Pages` workflow that publishes it from `main`
 - Generic Wayland layer-shell compositor fallback: on any non-Hyprland, non-KDE Wayland session (Niri, Sway, river, ...) the daemon now uses Wayland-native monitor discovery (`wl:` monitor-id prefix) with the standard layer-shell rendering path; fullscreen detection is not available on this path yet
 - Scene parity audit (`docs/scene-parity-audit.md`) documenting every known visual divergence between the Scene Composer preview and `scene-runner`, including newly found runtime bugs (sprite rotation ignored, rain occlusion axis, sRGB color handling) and preview bugs (missing blend modes, particle draw order)
 - KDE Plasma 6 wallpaper bridge foundation under `integrations/kde-plasma` with a real Plasma wallpaper plugin package, install script, and animated placeholder `main.qml`
