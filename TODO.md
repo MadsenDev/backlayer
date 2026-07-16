@@ -24,6 +24,15 @@ wallpaper that they authored in the Scene Composer.
 - [ ] Handle monitor hotplug and removal cleanly
 - [ ] Handle video renderer restart on failure
 
+### Compositor fallback
+
+- [x] Add a generic Wayland layer-shell compositor fallback (Niri, Sway,
+      river, ...) with Wayland-native monitor discovery so the daemon runs
+      outside Hyprland/KDE — needed since the primary dev machine no longer
+      runs Hyprland
+- [ ] Manually verify the generic fallback end-to-end on Niri (discovery,
+      assignment, layer-shell rendering, input passthrough)
+
 ### Scene parity: Composer preview ↔ `scene-runner` 1:1
 
 The composer preview is a Canvas2D implementation in the UI while
@@ -119,6 +128,9 @@ Milestone 1 ships.
 
 ## Backlog (unscheduled)
 
+- [ ] Add fullscreen detection for non-Hyprland Wayland compositors
+      (zwlr-foreign-toplevel or compositor IPC such as `niri msg`) so
+      pause-on-fullscreen works on the generic fallback path
 - [ ] Add slideshow support
 - [ ] Add GIF support or explicitly defer it
 - [ ] Render a simple built-in demo shader

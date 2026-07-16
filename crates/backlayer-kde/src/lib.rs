@@ -18,18 +18,44 @@ pub enum KdeError {
     Dispatch(#[from] wayland_client::DispatchError),
 }
 
+/// Wayland-native monitor discovery via `wl_output`. Works on any Wayland
+/// compositor; the name and monitor-id prefix identify which desktop the
+/// daemon believes it is running on so stored assignments stay stable.
+#[derive(Debug, Clone)]
+pub struct WaylandOutputClient {
+    name: &'static str,
+    id_prefix: &'static str,
+}
+
+impl WaylandOutputClient {
+    pub fn new(name: &'static str, id_prefix: &'static str) -> Self {
+        Self { name, id_prefix }
+    }
+
+    /// KDE Plasma session.
+    pub fn kde() -> Self {
+        Self::new("kde", "kde")
+    }
+
+    /// Generic layer-shell compositor fallback (Niri, Sway, river, ...).
+    pub fn generic() -> Self {
+        Self::new("wayland", "wl")
+    }
+}
+
+/// Backwards-compatible KDE constructor.
 #[derive(Debug, Default, Clone)]
 pub struct KdeClient;
 
 impl KdeClient {
-    pub fn new() -> Self {
-        Self
+    pub fn new() -> WaylandOutputClient {
+        WaylandOutputClient::kde()
     }
 }
 
-impl CompositorClient for KdeClient {
+impl CompositorClient for WaylandOutputClient {
     fn compositor_name(&self) -> &'static str {
-        "kde"
+        self.name
     }
 
     fn discover_monitors(
@@ -56,7 +82,7 @@ impl CompositorClient for KdeClient {
                 probe
                     .output_state
                     .info(&output)
-                    .map(|info| monitor_info_from_output(&info))
+                    .map(|info| monitor_info_from_output(self.id_prefix, &info))
             })
             .collect();
 
@@ -64,12 +90,16 @@ impl CompositorClient for KdeClient {
     }
 
     fn fullscreen_active(&self) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-        // KDE fullscreen detection via D-Bus or zwlr_foreign_toplevel is not yet implemented.
+        // Fullscreen detection for non-Hyprland compositors (zwlr foreign
+        // toplevel, KDE D-Bus, or niri IPC) is not yet implemented.
         Ok(false)
     }
 }
 
-fn monitor_info_from_output(info: &smithay_client_toolkit::output::OutputInfo) -> MonitorInfo {
+fn monitor_info_from_output(
+    id_prefix: &str,
+    info: &smithay_client_toolkit::output::OutputInfo,
+) -> MonitorInfo {
     let current_mode = info
         .modes
         .iter()
@@ -92,7 +122,7 @@ fn monitor_info_from_output(info: &smithay_client_toolkit::output::OutputInfo) -
     let model = info.model.clone();
     let disabled = current_mode.is_none();
 
-    let id = build_monitor_id(&make, &model, &description, &output_name);
+    let id = build_monitor_id(id_prefix, &make, &model, &description, &output_name);
 
     MonitorInfo {
         id,
@@ -112,13 +142,20 @@ fn monitor_info_from_output(info: &smithay_client_toolkit::output::OutputInfo) -
     }
 }
 
-fn build_monitor_id(make: &str, model: &str, description: &str, output_name: &str) -> String {
+fn build_monitor_id(
+    id_prefix: &str,
+    make: &str,
+    model: &str,
+    description: &str,
+    output_name: &str,
+) -> String {
     let fingerprint = normalized_component(description)
         .or_else(|| normalized_component(output_name))
         .unwrap_or_else(|| "unknown".to_string());
 
     format!(
-        "kde:{}:{}:{}",
+        "{}:{}:{}:{}",
+        id_prefix,
         slugify(make).unwrap_or_else(|| "unknown".to_string()),
         slugify(model).unwrap_or_else(|| "unknown".to_string()),
         fingerprint
@@ -198,10 +235,18 @@ mod tests {
 
     #[test]
     fn monitor_id_uses_kde_prefix() {
-        let id = build_monitor_id("Samsung", "ATNA33AA04", "Samsung ATNA33AA04", "eDP-1");
+        let id = build_monitor_id("kde", "Samsung", "ATNA33AA04", "Samsung ATNA33AA04", "eDP-1");
         assert!(id.starts_with("kde:"));
         assert!(id.contains("samsung"));
         assert!(id.contains("atna33aa04"));
+    }
+
+    #[test]
+    fn monitor_id_uses_generic_wayland_prefix() {
+        let id = build_monitor_id("wl", "Dell Inc.", "U2720Q", "Dell U2720Q", "DP-3");
+        assert!(id.starts_with("wl:"));
+        assert!(id.contains("dell"));
+        assert!(id.contains("u2720q"));
     }
 
     #[test]
@@ -213,7 +258,7 @@ mod tests {
 
     #[test]
     fn build_monitor_id_falls_back_to_output_name() {
-        let id = build_monitor_id("", "", "", "eDP-1");
+        let id = build_monitor_id("kde", "", "", "", "eDP-1");
         assert_eq!(id, "kde:unknown:unknown:edp-1");
     }
 }

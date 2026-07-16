@@ -120,6 +120,7 @@ backlayer
 - Native scene direction: the manager can now create Backlayer-native `scene` assets from existing image wallpapers by saving a native scene document with sprite, effect, and particle nodes into user-managed asset storage under `~/.config/backlayer/assets`
 - Native scene runtime direction: `scene-runner` now treats native Backlayer scenes as a real-time scene graph instead of a stack of pre-rendered overlay images, with GPU-native sprite/effect rendering plus a GPU-native particle pass, and native emitters now support positioned origins, explicit shapes, burst/range controls, over-life curves, direction control, tint, plus scene-level and sprite-level particle occluders and landing surfaces with optional custom drawn regions and polygon particle areas
 - KDE Plasma bridge direction: add a Plasma 6 wallpaper plugin adapter package that first proves animated QML wallpaper execution inside Plasma wallpaper context, then layers daemon status/monitor mapping/live frame bridge work while keeping Hyprland layer-shell as the primary MVP runtime path
+- Generic Wayland fallback direction: any non-Hyprland, non-KDE Wayland session gets Wayland-native monitor discovery plus the standard layer-shell rendering path, so Backlayer runs best-effort on layer-shell compositors like Niri and Sway without expanding the verified MVP test matrix beyond Hyprland
 
 ### Why this scope works
 
@@ -148,7 +149,7 @@ The MVP should support:
 These should stay out of scope until the runtime is stable:
 
 - Supporting all Linux desktop environments
-- KDE / GNOME / X11 compatibility (except a narrow KDE Plasma wallpaper-plugin bridge foundation explicitly limited to proving plugin load + animation and later daemon bridge integration)
+- KDE / GNOME / X11 compatibility (except a narrow KDE Plasma wallpaper-plugin bridge foundation explicitly limited to proving plugin load + animation and later daemon bridge integration, and a best-effort generic Wayland layer-shell fallback for compositors like Niri and Sway that reuses the existing discovery and rendering paths without adding compositor-specific integrations)
 - Workshop / marketplace integration
 - Wallpaper scripting engines
 - Full creator-grade editor tooling
