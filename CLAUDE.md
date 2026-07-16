@@ -45,13 +45,13 @@ Backlayer is a Hyprland-first animated wallpaper runtime. The daemon owns all ru
 - `backlayer-types`: shared domain types — `DaemonRequest`, `DaemonResponse`, `DaemonState`, `AssetMetadata`, scene document types, `CompositorClient` trait
 - `backlayer-config`: config load/save, asset discovery, `.backlayer` package format, socket path resolution
 - `backlayer-hyprland`: `hyprctl monitors` parsing, stable `monitor_id` derivation (`hypr:` prefix), implements `CompositorClient`
-- `backlayer-kde`: Wayland-native monitor discovery via `wl_output`/sctk, implements `CompositorClient` (`kde:` prefix, fullscreen detection returns `false`)
+- `backlayer-kde`: Wayland-native monitor discovery via `wl_output`/sctk — hosts `WaylandOutputClient`, which implements `CompositorClient` for both KDE (`kde:` prefix) and the generic layer-shell fallback (`wl:` prefix); fullscreen detection returns `false` on both
 - `backlayer-wayland`: `smithay-client-toolkit` layer-shell session abstraction, output binding
 - `backlayer-renderer-{image,shader,video}`: renderer contracts (not the runner processes themselves)
 
 ### Compositor detection
 
-`detect_compositor()` in `apps/backlayerd/src/main.rs` checks `XDG_CURRENT_DESKTOP` and `HYPRLAND_INSTANCE_SIGNATURE` to select `HyprlandClient` or `KdeClient`. The selected `Arc<dyn CompositorClient>` is threaded through `IpcServer` and `RuntimeManager`. KDE's `pause_on_fullscreen` always returns `false` (fullscreen detection not yet implemented for KDE).
+`detect_compositor()` in `apps/backlayerd/src/main.rs` checks `XDG_CURRENT_DESKTOP` and `HYPRLAND_INSTANCE_SIGNATURE` to select `HyprlandClient`, `KdeClient` (KDE/Plasma), or — for any other Wayland session (`WAYLAND_DISPLAY` set; Niri, Sway, river, ...) — the generic `WaylandOutputClient` fallback. The selected `Arc<dyn CompositorClient>` is threaded through `IpcServer` and `RuntimeManager`. Fullscreen detection (`pause_on_fullscreen`) returns `false` on every non-Hyprland path.
 
 ### IPC
 

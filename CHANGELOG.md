@@ -8,6 +8,8 @@ The format is intentionally simple for now and follows an `Unreleased` section p
 
 ### Added
 
+- Generic Wayland layer-shell compositor fallback: on any non-Hyprland, non-KDE Wayland session (Niri, Sway, river, ...) the daemon now uses Wayland-native monitor discovery (`wl:` monitor-id prefix) with the standard layer-shell rendering path; fullscreen detection is not available on this path yet
+- Scene parity audit (`docs/scene-parity-audit.md`) documenting every known visual divergence between the Scene Composer preview and `scene-runner`, including newly found runtime bugs (sprite rotation ignored, rain occlusion axis, sRGB color handling) and preview bugs (missing blend modes, particle draw order)
 - KDE Plasma 6 wallpaper bridge foundation under `integrations/kde-plasma` with a real Plasma wallpaper plugin package, install script, and animated placeholder `main.qml`
 - Arch/CachyOS packaging helpers, Arch post-install guidance, and an AUR-ready packaging layout for both release and `-git` package tracks
 - Built-in `demo.prism-loop` native video asset for end-to-end video playback testing
@@ -22,6 +24,9 @@ The format is intentionally simple for now and follows an `Unreleased` section p
 
 ### Changed
 
+- Scene Composer preview particles now run the same stateful simulation as `scene-runner` — burst emission, warm start, per-frame gravity/drag integration, and permanent surface landing now behave in the editor exactly as they do on the wallpaper
+- `scene-runner` now applies the composer's per-preset default size/alpha/color curves and curve sanitation when a scene document omits or misorders them
+- Product docs now carry a milestone-based roadmap targeting a first public v0.3.0 release, with Scene Composer ↔ `scene-runner` visual parity elevated to a headline focus and KDE Plasma bridge work sequenced after the Hyprland MVP ships
 - Built-in asset discovery now works for installed package layouts such as `/usr/share/backlayer/assets`, not only workspace checkouts
 - KDE Plasma bridge foundation now uses the wallpaper-specific QML import module and safer shell-restart fallback ordering in the installer docs/script
 - Product docs now track the explicitly requested narrow KDE Plasma plugin bridge exception while preserving Hyprland-first runtime scope
@@ -40,6 +45,12 @@ The format is intentionally simple for now and follows an `Unreleased` section p
 
 ### Fixed
 
+- Native scene sprites now honor `rotation_deg` on the wallpaper, matching the Scene Composer preview
+- Native scene rain occlusion segments now follow the streak's actual long axis, so rain hides behind occluders where the preview shows it
+- Native scene effect and particle colors are now srgb-decoded before GPU upload, so wallpaper colors match the authored hex instead of rendering brighter
+- Native scene rain streaks now render with an opaque center and feathered edges instead of an inverted (hollow-centered) feather
+- Native scene emitter `min_life` now floors at 0.2s like the composer preview, removing a `max_life = 0` NaN
+- Scene Composer preview now draws particles on top of all sprites and effects, composites them additively with the runtime's radial feather, honors sprite blend modes, matches the runtime's glow/vignette falloff curves, no longer tints custom glow colors toward the default, and uses the runtime's sprite behavior constants
 - Native scene particle occlusion now uses the rendered particle footprint more closely, so rain and other stretched particles hide behind occluders much more reliably
 
 ## [0.2.0] - 2026-03-13

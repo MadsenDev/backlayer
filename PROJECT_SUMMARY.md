@@ -26,6 +26,22 @@ Build a usable animated wallpaper system for Hyprland with:
 
 If those pieces work reliably together, the MVP is successful.
 
+## Roadmap Direction
+
+The route to market runs through the Linux gaming migration (SteamOS,
+CachyOS, Bazzite, Nobara). The sequencing is:
+
+1. `v0.3.0` — first public release of the Hyprland MVP: input-passthrough and
+   multi-monitor verification, a hardware-accelerated video path, and Scene
+   Composer ↔ `scene-runner` visual parity as a headline focus
+2. `v0.3.x` — a provable performance story: published per-renderer CPU/GPU
+   benchmarks and idle/resource policy, because "it gets out of the way when
+   you play" is the core trust argument for gamers
+3. `v0.4.0` — the KDE Plasma bridge, reaching the desktop most gaming distros
+   ship by default
+
+`TODO.md` carries the milestone-level execution detail.
+
 ## Core Product Shape
 
 Backlayer should be structured as a wallpaper runtime made of five core areas:
@@ -104,6 +120,7 @@ backlayer
 - Native scene direction: the manager can now create Backlayer-native `scene` assets from existing image wallpapers by saving a native scene document with sprite, effect, and particle nodes into user-managed asset storage under `~/.config/backlayer/assets`
 - Native scene runtime direction: `scene-runner` now treats native Backlayer scenes as a real-time scene graph instead of a stack of pre-rendered overlay images, with GPU-native sprite/effect rendering plus a GPU-native particle pass, and native emitters now support positioned origins, explicit shapes, burst/range controls, over-life curves, direction control, tint, plus scene-level and sprite-level particle occluders and landing surfaces with optional custom drawn regions and polygon particle areas
 - KDE Plasma bridge direction: add a Plasma 6 wallpaper plugin adapter package that first proves animated QML wallpaper execution inside Plasma wallpaper context, then layers daemon status/monitor mapping/live frame bridge work while keeping Hyprland layer-shell as the primary MVP runtime path
+- Generic Wayland fallback direction: any non-Hyprland, non-KDE Wayland session gets Wayland-native monitor discovery plus the standard layer-shell rendering path, so Backlayer runs best-effort on layer-shell compositors like Niri and Sway without expanding the verified MVP test matrix beyond Hyprland
 
 ### Why this scope works
 
@@ -132,7 +149,7 @@ The MVP should support:
 These should stay out of scope until the runtime is stable:
 
 - Supporting all Linux desktop environments
-- KDE / GNOME / X11 compatibility (except a narrow KDE Plasma wallpaper-plugin bridge foundation explicitly limited to proving plugin load + animation and later daemon bridge integration)
+- KDE / GNOME / X11 compatibility (except a narrow KDE Plasma wallpaper-plugin bridge foundation explicitly limited to proving plugin load + animation and later daemon bridge integration, and a best-effort generic Wayland layer-shell fallback for compositors like Niri and Sway that reuses the existing discovery and rendering paths without adding compositor-specific integrations)
 - Workshop / marketplace integration
 - Wallpaper scripting engines
 - Full creator-grade editor tooling
@@ -153,6 +170,8 @@ Backlayer should feel like a deliberate runtime, not a media player embedded beh
 - Multi-monitor behavior must be predictable
 - Performance controls must exist from the beginning
 - Crash recovery and restart behavior must be owned by the daemon
+- The Scene Composer preview must faithfully predict what `scene-runner`
+  draws on the wallpaper — what you author is what you get
 
 ## Success Criteria
 

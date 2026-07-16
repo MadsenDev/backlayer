@@ -6,7 +6,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use backlayer_config::ConfigStore;
 use backlayer_hyprland::HyprlandClient;
-use backlayer_kde::KdeClient;
+use backlayer_kde::{KdeClient, WaylandOutputClient};
 use backlayer_renderer_image::ImageRenderer;
 use backlayer_renderer_shader::ShaderRenderer;
 use backlayer_renderer_video::VideoRenderer;
@@ -22,6 +22,7 @@ fn detect_compositor() -> Arc<dyn CompositorClient> {
     let is_hyprland =
         desktop.contains("hyprland") || std::env::var("HYPRLAND_INSTANCE_SIGNATURE").is_ok();
     let is_kde = desktop.contains("kde") || desktop.contains("plasma");
+    let has_wayland = std::env::var("WAYLAND_DISPLAY").is_ok();
 
     if is_hyprland {
         info!("detected compositor: hyprland");
@@ -29,6 +30,12 @@ fn detect_compositor() -> Arc<dyn CompositorClient> {
     } else if is_kde {
         info!("detected compositor: kde");
         Arc::new(KdeClient::new())
+    } else if has_wayland {
+        // Any other Wayland session (Niri, Sway, river, ...) gets
+        // Wayland-native monitor discovery; rendering works wherever the
+        // compositor implements wlr-layer-shell.
+        info!(desktop = %desktop, "detected compositor: generic wayland layer-shell fallback");
+        Arc::new(WaylandOutputClient::generic())
     } else {
         info!(desktop = %desktop, "compositor unknown, defaulting to hyprland client");
         Arc::new(HyprlandClient::new())
