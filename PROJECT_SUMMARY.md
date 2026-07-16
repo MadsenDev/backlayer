@@ -26,6 +26,22 @@ Build a usable animated wallpaper system for Hyprland with:
 
 If those pieces work reliably together, the MVP is successful.
 
+## Roadmap Direction
+
+The route to market runs through the Linux gaming migration (SteamOS,
+CachyOS, Bazzite, Nobara). The sequencing is:
+
+1. `v0.3.0` — first public release of the Hyprland MVP: input-passthrough and
+   multi-monitor verification, a hardware-accelerated video path, and Scene
+   Composer ↔ `scene-runner` visual parity as a headline focus
+2. `v0.3.x` — a provable performance story: published per-renderer CPU/GPU
+   benchmarks and idle/resource policy, because "it gets out of the way when
+   you play" is the core trust argument for gamers
+3. `v0.4.0` — the KDE Plasma bridge, reaching the desktop most gaming distros
+   ship by default
+
+`TODO.md` carries the milestone-level execution detail.
+
 ## Core Product Shape
 
 Backlayer should be structured as a wallpaper runtime made of five core areas:
@@ -153,6 +169,8 @@ Backlayer should feel like a deliberate runtime, not a media player embedded beh
 - Multi-monitor behavior must be predictable
 - Performance controls must exist from the beginning
 - Crash recovery and restart behavior must be owned by the daemon
+- The Scene Composer preview must faithfully predict what `scene-runner`
+  draws on the wallpaper — what you author is what you get
 
 ## Success Criteria
 

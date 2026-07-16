@@ -22,6 +22,7 @@ The format is intentionally simple for now and follows an `Unreleased` section p
 
 ### Changed
 
+- Product docs now carry a milestone-based roadmap targeting a first public v0.3.0 release, with Scene Composer ↔ `scene-runner` visual parity elevated to a headline focus and KDE Plasma bridge work sequenced after the Hyprland MVP ships
 - Built-in asset discovery now works for installed package layouts such as `/usr/share/backlayer/assets`, not only workspace checkouts
 - KDE Plasma bridge foundation now uses the wallpaper-specific QML import module and safer shell-restart fallback ordering in the installer docs/script
 - Product docs now track the explicitly requested narrow KDE Plasma plugin bridge exception while preserving Hyprland-first runtime scope
