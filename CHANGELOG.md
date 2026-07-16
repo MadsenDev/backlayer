@@ -42,6 +42,12 @@ The format is intentionally simple for now and follows an `Unreleased` section p
 
 ### Fixed
 
+- Native scene sprites now honor `rotation_deg` on the wallpaper, matching the Scene Composer preview
+- Native scene rain occlusion segments now follow the streak's actual long axis, so rain hides behind occluders where the preview shows it
+- Native scene effect and particle colors are now srgb-decoded before GPU upload, so wallpaper colors match the authored hex instead of rendering brighter
+- Native scene rain streaks now render with an opaque center and feathered edges instead of an inverted (hollow-centered) feather
+- Native scene emitter `min_life` now floors at 0.2s like the composer preview, removing a `max_life = 0` NaN
+- Scene Composer preview now draws particles on top of all sprites and effects, composites them additively with the runtime's radial feather, honors sprite blend modes, matches the runtime's glow/vignette falloff curves, no longer tints custom glow colors toward the default, and uses the runtime's sprite behavior constants
 - Native scene particle occlusion now uses the rendered particle footprint more closely, so rain and other stretched particles hide behind occluders much more reliably
 
 ## [0.2.0] - 2026-03-13

@@ -35,13 +35,14 @@ truth for scene evaluation.
 - [x] Audit and document every visual divergence between the Canvas2D
       composer preview and the wgpu `scene-runner` (sprites, effects,
       emitters, blending, color, timing) — see `docs/scene-parity-audit.md`
-- [ ] Fix runtime bugs surfaced by the parity audit: sprite `rotation_deg`
+- [x] Fix runtime bugs surfaced by the parity audit: sprite `rotation_deg`
       ignored by the sprite pipeline, rain occlusion segments built along the
-      wrong axis, sRGB colors uploaded as linear, and the `max_life = 0` NaN
-- [ ] Fix preview bugs surfaced by the parity audit: blend modes and additive
+      wrong axis, sRGB colors uploaded as linear, the `max_life = 0` NaN, and
+      the inverted rain streak feather
+- [x] Fix preview bugs surfaced by the parity audit: blend modes and additive
       particle compositing never applied, particles drawn in node order
-      instead of on top, hardcoded glow gradient outer color, and behavior
-      constants that drifted from the runtime's
+      instead of on top, hardcoded glow gradient outer color, glow/vignette
+      falloff curves, and behavior constants that drifted from the runtime's
 - [ ] Write a single scene-semantics spec both renderers implement:
       coordinate space, units, time base, curve interpolation, and blend
       modes per node type

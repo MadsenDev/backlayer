@@ -34,7 +34,7 @@ struct SpriteUniforms {
   rect_w: f32,
   rect_h: f32,
   opacity: f32,
-  _padding: f32,
+  rotation_rad: f32,
 }
 
 @group(0) @binding(0)
@@ -67,7 +67,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
   let pixel = in.position.xy;
   let rect_min = vec2<f32>(sprite.rect_x, sprite.rect_y);
   let rect_size = vec2<f32>(max(sprite.rect_w, 1.0), max(sprite.rect_h, 1.0));
-  let uv = (pixel - rect_min) / rect_size;
+  let center = rect_min + rect_size * 0.5;
+  let rel = pixel - center;
+  let cos_r = cos(sprite.rotation_rad);
+  let sin_r = sin(sprite.rotation_rad);
+  let local = vec2<f32>(
+    (rel.x * cos_r) + (rel.y * sin_r),
+    (rel.y * cos_r) - (rel.x * sin_r),
+  );
+  let uv = (local + rect_size * 0.5) / rect_size;
   if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
     discard;
   }
@@ -212,7 +220,7 @@ fn fs_main(in: ParticleVsOut) -> @location(0) vec4<f32> {
   }
 
   let edge = max(abs(in.local_uv.x) * 2.0, abs(in.local_uv.y) * 2.0);
-  let feather = smoothstep(1.0, 0.82, 1.0 - edge);
+  let feather = 1.0 - smoothstep(0.82, 1.0, edge);
   return vec4<f32>(in.color.rgb, in.color.a * feather);
 }
 "#;
@@ -553,7 +561,7 @@ struct SpriteUniforms {
     rect_w: f32,
     rect_h: f32,
     opacity: f32,
-    _padding: f32,
+    rotation_rad: f32,
 }
 
 #[repr(C)]
@@ -613,6 +621,7 @@ struct GpuSceneRuntime {
     particle_instance_buffer: wgpu::Buffer,
     particle_capacity: usize,
     surface_size: (u32, u32),
+    output_is_srgb: bool,
     debug_particle_areas: bool,
 }
 
@@ -1055,6 +1064,7 @@ impl GpuSceneRuntime {
             particle_instance_buffer,
             particle_capacity,
             surface_size: (surface_width, surface_height),
+            output_is_srgb: config.format.is_srgb(),
             debug_particle_areas,
         })
     }
@@ -1070,6 +1080,13 @@ impl GpuSceneRuntime {
                 scene,
                 self.surface_size,
             ));
+        }
+        if self.output_is_srgb {
+            for instance in &mut particle_instances {
+                instance.color_r = srgb_component_to_linear(instance.color_r);
+                instance.color_g = srgb_component_to_linear(instance.color_g);
+                instance.color_b = srgb_component_to_linear(instance.color_b);
+            }
         }
         let particle_count = particle_instances.len().min(self.particle_capacity);
         if particle_count > 0 {
@@ -1100,11 +1117,20 @@ impl GpuSceneRuntime {
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 5.0 / 255.0,
-                            g: 7.0 / 255.0,
-                            b: 10.0 / 255.0,
-                            a: 1.0,
+                        load: wgpu::LoadOp::Clear(if self.output_is_srgb {
+                            wgpu::Color {
+                                r: srgb_component_to_linear(5.0 / 255.0) as f64,
+                                g: srgb_component_to_linear(7.0 / 255.0) as f64,
+                                b: srgb_component_to_linear(10.0 / 255.0) as f64,
+                                a: 1.0,
+                            }
+                        } else {
+                            wgpu::Color {
+                                r: 5.0 / 255.0,
+                                g: 7.0 / 255.0,
+                                b: 10.0 / 255.0,
+                                a: 1.0,
+                            }
                         }),
                         store: wgpu::StoreOp::Store,
                     },
@@ -1133,7 +1159,7 @@ impl GpuSceneRuntime {
                             rect_w,
                             rect_h,
                             opacity,
-                            _padding: 0.0,
+                            rotation_rad: sprite.rotation_deg.to_radians(),
                         };
                         self.queue.write_buffer(
                             &self.sprite_uniform_buffer,
@@ -1154,7 +1180,14 @@ impl GpuSceneRuntime {
                         pass.draw(0..3, 0..1);
                     }
                     SceneNode::Effect(effect) if effect.enabled => {
-                        let color = parse_effect_color(effect);
+                        let mut color = parse_effect_color(effect);
+                        if self.output_is_srgb {
+                            color = [
+                                srgb_component_to_linear(color[0]),
+                                srgb_component_to_linear(color[1]),
+                                srgb_component_to_linear(color[2]),
+                            ];
+                        }
                         let uniforms = EffectUniforms {
                             surface_width: self.surface_size.0 as f32,
                             surface_height: self.surface_size.1 as f32,
@@ -1678,12 +1711,17 @@ fn resolve_emitter_max_speed(emitter: &backlayer_types::SceneEmitterNode) -> f32
 }
 
 fn resolve_emitter_min_life(emitter: &backlayer_types::SceneEmitterNode) -> f32 {
-    emitter.min_life.unwrap_or(match emitter.preset {
-        SceneEmitterPreset::Embers => 2.8,
-        SceneEmitterPreset::Rain => 1.7,
-        SceneEmitterPreset::Dust => 4.5,
-        SceneEmitterPreset::Snow => 6.0,
-    })
+    // Floor matches the composer preview and guards the max_life = 0 case,
+    // which would otherwise produce NaN life progress.
+    emitter
+        .min_life
+        .unwrap_or(match emitter.preset {
+            SceneEmitterPreset::Embers => 2.8,
+            SceneEmitterPreset::Rain => 1.7,
+            SceneEmitterPreset::Dust => 4.5,
+            SceneEmitterPreset::Snow => 6.0,
+        })
+        .max(0.2)
 }
 
 fn resolve_emitter_max_life(emitter: &backlayer_types::SceneEmitterNode) -> f32 {
@@ -1840,6 +1878,17 @@ fn parse_effect_color(effect: &backlayer_types::SceneEffectNode) -> [f32; 3] {
         return parse_color_components(default_effect_color_hex(&effect.effect));
     }
     parse_color_components(value)
+}
+
+// Scene colors are authored as sRGB hex. On an sRGB render target the shader
+// outputs are treated as linear and re-encoded on write, so components must be
+// decoded to linear first or every color renders brighter than authored.
+fn srgb_component_to_linear(value: f32) -> f32 {
+    if value <= 0.04045 {
+        value / 12.92
+    } else {
+        ((value + 0.055) / 1.055).powf(2.4)
+    }
 }
 
 fn parse_color_components(value: &str) -> [f32; 3] {
@@ -2091,8 +2140,10 @@ fn build_particle_instances(scene: &NativeSceneRuntime) -> Vec<ParticleInstance>
                 }
             };
             let occluded = if matches!(emitter.preset, SceneEmitterPreset::Rain) {
-                let dx = angle.cos() * size_y * 0.5;
-                let dy = angle.sin() * size_y * 0.5;
+                // The streak quad's long axis is its local Y: rotating (0, 1)
+                // by `angle` gives (-sin, cos), not (cos, sin).
+                let dx = -angle.sin() * size_y * 0.5;
+                let dy = angle.cos() * size_y * 0.5;
                 particle_segment_is_occluded(
                     &blockers,
                     (particle.x - dx, particle.y - dy),

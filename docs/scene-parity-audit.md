@@ -1,13 +1,55 @@
 # Scene Parity Audit: Composer Preview vs `scene-runner`
 
-Status: audit complete (2026-07-16). This document catalogs every known
-behavioral and visual divergence between the Scene Composer preview
-(Canvas2D, `apps/ui/src/App.tsx`) and the native scene runtime
-(wgpu/WGSL, `apps/scene-runner/src/main.rs`). It is the input for the
-scene-semantics spec and the parity fixes tracked in `TODO.md` under
-Milestone 1.
+Status: audit complete (2026-07-16); quick-win fixes landed the same day —
+see the fix log below. This document catalogs every known behavioral and
+visual divergence between the Scene Composer preview (Canvas2D,
+`apps/ui/src/App.tsx`) and the native scene runtime (wgpu/WGSL,
+`apps/scene-runner/src/main.rs`). It is the input for the scene-semantics
+spec and the parity fixes tracked in `TODO.md` under Milestone 1.
 
 Line references are as of commit `cd486b4`.
+
+## Fix log (2026-07-16)
+
+Landed as quick wins; the divergence descriptions below are kept as the
+historical record.
+
+Runtime fixes:
+- **2.1** sprite `rotation_deg` now rotates the sampled rect in the sprite
+  shader (inverse-rotated UV lookup around the rect center)
+- **4.3** rain occlusion segments now follow the streak's actual long axis
+  (`(-sin, cos)` instead of `(cos, sin)`)
+- **1.3 (partial)** effect, particle, and clear colors are srgb-decoded
+  before upload when the surface format is sRGB, so runtime colors no longer
+  render brighter than authored; the gamma-vs-linear *blending space*
+  difference remains and is a spec decision
+- **4.4 (partial)** `min_life` now floors at 0.2 like the preview, which also
+  removes the `max_life = 0` NaN
+- **4.6 (new finding)** the rain streak feather in the particle shader was
+  inverted — `smoothstep(1.0, 0.82, 1.0 - edge)` produced a transparent
+  center and hard outer edges instead of an opaque center with a feathered
+  outer 18%; now `1.0 - smoothstep(0.82, 1.0, edge)`
+
+Preview fixes:
+- **1.4** particles now draw in a second pass after all sprites and effects,
+  matching the runtime's always-on-top particle pass
+- **1.5** particles now composite additively (`lighter`) and circular
+  particles use a radial gradient matching the runtime's
+  `smoothstep(1, 0, r)` feather; streak edge feather remains approximate
+- **2.2** sprite blend modes now mirror the runtime's pipeline mapping
+  (add/screen → additive, alpha/multiply → source-over); exact
+  screen/multiply semantics remain a spec decision
+- **2.3** drift/pulse/orbit constants now use the runtime's values, and orbit
+  respects `amount_y`
+- **3.1 + 3.2** glow uses the runtime's `(1 − 1.65·d)²` falloff and no longer
+  hardcodes the default color in the outer gradient stop
+- **3.3** vignette uses the runtime's radius fraction (0.42 of the
+  half-diagonal) and `^1.8` falloff
+
+Still open from this audit: 1.1 (particle model), 1.2 (pixel units),
+1.3 (blending space), 1.6 (time base), 1.7 (randomness), 4.1/4.2 (curve
+fallbacks and sanitation), 4.4 (region/line clamps), 4.5 (particle sprites),
+and the low-severity items in 2.4 and 3.4.
 
 ## How the two renderers relate
 

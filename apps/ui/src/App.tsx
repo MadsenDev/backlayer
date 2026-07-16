@@ -4762,7 +4762,13 @@ function drawComposerSceneFrame(
       }
     } else if (node.kind === 'effect') {
       drawComposerEffectNode(context, node, timeSeconds)
-    } else if (node.kind === 'emitter') {
+    }
+  }
+
+  // scene-runner draws all particles in a single pass after sprites and
+  // effects, so they always sit on top regardless of node order.
+  for (const node of nodes) {
+    if (node.kind === 'emitter' && node.enabled) {
       drawComposerEmitterNode(context, images, node, particleBlockers, timeSeconds)
     }
   }
@@ -4818,15 +4824,15 @@ function resolveComposerSpriteLayoutFromBounds(
     const phase = timeSeconds * behavior.speed + behavior.phase
     if (behavior.kind === 'drift') {
       offsetX += Math.sin(phase) * behavior.amount_x
-      offsetY += Math.cos(phase * 0.9) * behavior.amount_y
+      offsetY += Math.cos(phase * 0.85) * behavior.amount_y
     }
     if (behavior.kind === 'pulse') {
       scale += Math.sin(phase) * behavior.amount
-      opacity *= 0.88 + ((Math.sin(phase) + 1) * 0.06)
+      opacity *= 0.9 + ((Math.sin(phase) + 1) * 0.05)
     }
     if (behavior.kind === 'orbit') {
       offsetX += Math.cos(phase) * behavior.amount
-      offsetY += Math.sin(phase) * Math.max(behavior.amount * 0.6, 0)
+      offsetY += Math.sin(phase) * Math.max(behavior.amount_y, behavior.amount * 0.6)
     }
   }
 
@@ -4976,8 +4982,12 @@ function drawComposerSpriteNode(
 ) {
   const layout = resolveComposerSpriteLayout(context, image, node, timeSeconds)
 
+  const blend = node.blend ?? 'alpha'
   context.save()
   context.globalAlpha = layout.opacity
+  // Mirrors the runtime's pipeline mapping: add/screen use the additive
+  // pipeline, alpha/multiply use plain alpha blending.
+  context.globalCompositeOperation = blend === 'add' || blend === 'screen' ? 'lighter' : 'source-over'
   context.translate(layout.x + layout.width / 2, layout.y + layout.height / 2)
   context.rotate((node.rotation_deg * Math.PI) / 180)
   context.drawImage(image, -layout.width / 2, -layout.height / 2, layout.width, layout.height)
@@ -4995,31 +5005,38 @@ function drawComposerEffectNode(
   context.save()
   if (node.effect === 'glow') {
     const pulse = node.intensity * (0.78 + ((Math.sin(timeSeconds * Math.max(node.speed, 0.01)) + 1) * 0.11))
+    // Runtime falloff: alpha = (1 - 1.65·d)² over d = dist / max(w, h),
+    // reaching zero at radius max(w, h) / 1.65.
     const gradient = context.createRadialGradient(
       width * 0.5,
       height * 0.5,
       0,
       width * 0.5,
       height * 0.5,
-      Math.max(width, height) * 0.61,
+      Math.max(width, height) / 1.65,
     )
-    gradient.addColorStop(0, `rgba(${red}, ${green}, ${blue}, ${node.opacity * pulse})`)
-    gradient.addColorStop(0.45, `rgba(${red}, ${green}, ${blue}, ${0.34 * node.opacity * pulse})`)
-    gradient.addColorStop(1, 'rgba(255, 199, 133, 0)')
+    for (const stop of [0, 0.2, 0.4, 0.6, 0.8, 1]) {
+      const alpha = clamp01(((1 - stop) ** 2) * node.opacity * pulse)
+      gradient.addColorStop(stop, `rgba(${red}, ${green}, ${blue}, ${alpha})`)
+    }
     context.fillStyle = gradient
     context.fillRect(0, 0, width, height)
   } else if (node.effect === 'vignette') {
+    // Runtime falloff: alpha = clamp((d - 0.42) / 0.58)^1.8 over
+    // d = dist / length(center).
+    const outerRadius = Math.hypot(width * 0.5, height * 0.5)
     const gradient = context.createRadialGradient(
       width * 0.5,
       height * 0.5,
-      Math.min(width, height) * 0.22,
+      outerRadius * 0.42,
       width * 0.5,
       height * 0.5,
-      Math.hypot(width * 0.5, height * 0.5),
+      outerRadius,
     )
-    gradient.addColorStop(0, `rgba(${red}, ${green}, ${blue}, 0)`)
-    gradient.addColorStop(0.42, `rgba(${red}, ${green}, ${blue}, 0)`)
-    gradient.addColorStop(1, `rgba(${red}, ${green}, ${blue}, ${node.opacity * node.intensity})`)
+    for (const stop of [0, 0.25, 0.5, 0.75, 1]) {
+      const alpha = clamp01((stop ** 1.8) * node.opacity * node.intensity)
+      gradient.addColorStop(stop, `rgba(${red}, ${green}, ${blue}, ${alpha})`)
+    }
     context.fillStyle = gradient
     context.fillRect(0, 0, width, height)
   } else if (node.effect === 'scanlines') {
@@ -5061,6 +5078,16 @@ function drawComposerEffectNode(
   context.restore()
 }
 
+// smoothstep(1, 0, r) sampled at fixed offsets, same falloff the runtime
+// particle shader applies to circular particles.
+const PARTICLE_FEATHER_STOPS: Array<[number, number]> = [
+  [0, 1],
+  [0.25, 0.844],
+  [0.5, 0.5],
+  [0.75, 0.156],
+  [1, 0],
+]
+
 function drawComposerEmitterNode(
   context: CanvasRenderingContext2D,
   images: Map<string, HTMLImageElement>,
@@ -5072,6 +5099,8 @@ function drawComposerEmitterNode(
   const particleImageKey = resolveEmitterParticleImageKey(node)
   const particleImage = particleImageKey ? images.get(particleImageKey) ?? null : null
   context.save()
+  // scene-runner renders every particle with additive blending.
+  context.globalCompositeOperation = 'lighter'
   for (const particle of particles) {
     context.globalAlpha = particle.alpha
     if (particle.shape === 'texture' && particleImage) {
@@ -5084,13 +5113,20 @@ function drawComposerEmitterNode(
       context.save()
       context.translate(particle.x, particle.y)
       context.rotate(particle.angle)
-      context.fillStyle = particle.color
+      context.fillStyle = `rgb(${particle.red}, ${particle.green}, ${particle.blue})`
       context.fillRect(-particle.sizeX * 0.5, -particle.sizeY * 0.5, particle.sizeX, particle.sizeY)
       context.restore()
     } else {
-      context.fillStyle = particle.color
+      // Matches the runtime's radial smoothstep(1, 0, r) feather over the
+      // particle quad's half-size.
+      const featherRadius = Math.max(particle.sizeX, particle.sizeY, 1) * 0.5
+      const gradient = context.createRadialGradient(particle.x, particle.y, 0, particle.x, particle.y, featherRadius)
+      for (const [offset, alpha] of PARTICLE_FEATHER_STOPS) {
+        gradient.addColorStop(offset, `rgba(${particle.red}, ${particle.green}, ${particle.blue}, ${alpha})`)
+      }
+      context.fillStyle = gradient
       context.beginPath()
-      context.arc(particle.x, particle.y, particle.radius, 0, Math.PI * 2)
+      context.arc(particle.x, particle.y, featherRadius, 0, Math.PI * 2)
       context.fill()
     }
   }
@@ -5117,7 +5153,9 @@ function buildComposerEmitterParticles(
     sizeY: number
     angle: number
     alpha: number
-    color: string
+    red: number
+    green: number
+    blue: number
     shape: 'circle' | 'streak' | 'texture'
   }> = []
   const originX = resolveEmitterOriginX(node) * width
@@ -5156,7 +5194,7 @@ function buildComposerEmitterParticles(
     if (typeof collision === 'number') {
       y = collision
     }
-    const color = evaluateColorCurve(colorCurve, progress, resolveEmitterColorHex(node))
+    const { red, green, blue } = evaluateColorCurve(colorCurve, progress, resolveEmitterColorHex(node))
     const particleShape = node.preset === 'rain' && !textured ? 'streak' : textured ? 'texture' : 'circle'
     const renderAngle = resolveRenderedParticleAngleRad(node, vx, vy)
     const sizeX = node.preset === 'rain'
@@ -5186,55 +5224,26 @@ function buildComposerEmitterParticles(
       continue
     }
 
-    if (node.preset === 'rain') {
-      particles.push({
-        x,
-        y,
-        radius: 0,
-        sizeX,
-        sizeY,
-        angle: renderAngle,
-        alpha: alpha * 0.92,
-        color,
-        shape: particleShape,
-      })
-    } else if (node.preset === 'snow') {
-      particles.push({
-        x,
-        y,
-        radius,
-        sizeX,
-        sizeY,
-        angle: renderAngle,
-        alpha: alpha * 0.86,
-        color,
-        shape: particleShape,
-      })
-    } else if (node.preset === 'dust') {
-      particles.push({
-        x,
-        y,
-        radius,
-        sizeX,
-        sizeY,
-        angle: renderAngle,
-        alpha: alpha * 0.7,
-        color,
-        shape: particleShape,
-      })
-    } else {
-      particles.push({
-        x,
-        y,
-        radius,
-        sizeX,
-        sizeY,
-        angle: renderAngle,
-        alpha,
-        color,
-        shape: particleShape,
-      })
-    }
+    const alphaScale = node.preset === 'rain'
+      ? 0.92
+      : node.preset === 'snow'
+        ? 0.86
+        : node.preset === 'dust'
+          ? 0.7
+          : 1
+    particles.push({
+      x,
+      y,
+      radius: node.preset === 'rain' ? 0 : radius,
+      sizeX,
+      sizeY,
+      angle: renderAngle,
+      alpha: alpha * alphaScale,
+      red,
+      green,
+      blue,
+      shape: particleShape,
+    })
   }
 
   return particles
@@ -5592,7 +5601,7 @@ function evaluateScalarCurve(curve: SceneCurvePoint[], x: number) {
 function evaluateColorCurve(curve: SceneColorStop[], x: number, fallback: string) {
   const stops = resolveColorCurve(curve, [{ x: 0, color_hex: fallback }, { x: 1, color_hex: fallback }])
   if (x <= stops[0].x) {
-    return stops[0].color_hex
+    return parseColorHex(stops[0].color_hex)
   }
   for (let index = 1; index < stops.length; index += 1) {
     const left = stops[index - 1]
@@ -5602,10 +5611,10 @@ function evaluateColorCurve(curve: SceneColorStop[], x: number, fallback: string
       const from = parseColorHex(left.color_hex)
       const to = parseColorHex(right.color_hex)
       const mix = (start: number, end: number) => Math.round(start + ((end - start) * t))
-      return `rgb(${mix(from.red, to.red)}, ${mix(from.green, to.green)}, ${mix(from.blue, to.blue)})`
+      return { red: mix(from.red, to.red), green: mix(from.green, to.green), blue: mix(from.blue, to.blue) }
     }
   }
-  return stops[stops.length - 1].color_hex
+  return parseColorHex(stops[stops.length - 1].color_hex)
 }
 
 function smoothstep(edge0: number, edge1: number, x: number) {
