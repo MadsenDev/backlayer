@@ -8,6 +8,7 @@ The format is intentionally simple for now and follows an `Unreleased` section p
 
 ### Added
 
+- Scene parity audit (`docs/scene-parity-audit.md`) documenting every known visual divergence between the Scene Composer preview and `scene-runner`, including newly found runtime bugs (sprite rotation ignored, rain occlusion axis, sRGB color handling) and preview bugs (missing blend modes, particle draw order)
 - KDE Plasma 6 wallpaper bridge foundation under `integrations/kde-plasma` with a real Plasma wallpaper plugin package, install script, and animated placeholder `main.qml`
 - Arch/CachyOS packaging helpers, Arch post-install guidance, and an AUR-ready packaging layout for both release and `-git` package tracks
 - Built-in `demo.prism-loop` native video asset for end-to-end video playback testing

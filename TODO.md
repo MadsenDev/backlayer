@@ -32,9 +32,16 @@ implementations of the same scene semantics. Parity drift is structural, so
 this track both fixes today's divergences and moves toward a single source of
 truth for scene evaluation.
 
-- [ ] Audit and document every visual divergence between the Canvas2D
+- [x] Audit and document every visual divergence between the Canvas2D
       composer preview and the wgpu `scene-runner` (sprites, effects,
-      emitters, blending, color, timing)
+      emitters, blending, color, timing) — see `docs/scene-parity-audit.md`
+- [ ] Fix runtime bugs surfaced by the parity audit: sprite `rotation_deg`
+      ignored by the sprite pipeline, rain occlusion segments built along the
+      wrong axis, sRGB colors uploaded as linear, and the `max_life = 0` NaN
+- [ ] Fix preview bugs surfaced by the parity audit: blend modes and additive
+      particle compositing never applied, particles drawn in node order
+      instead of on top, hardcoded glow gradient outer color, and behavior
+      constants that drifted from the runtime's
 - [ ] Write a single scene-semantics spec both renderers implement:
       coordinate space, units, time base, curve interpolation, and blend
       modes per node type
