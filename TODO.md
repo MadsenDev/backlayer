@@ -46,15 +46,19 @@ truth for scene evaluation.
 - [ ] Write a single scene-semantics spec both renderers implement:
       coordinate space, units, time base, curve interpolation, and blend
       modes per node type
-- [ ] Match particle simulation behavior between preview and runtime: spawn
+- [x] Match particle simulation behavior between preview and runtime: spawn
       rates, lifetime/speed ranges, direction/gravity, burst timing, emitter
-      shapes, and over-life size/alpha/color curves
+      shapes, and over-life size/alpha/color curves — the preview now runs
+      the same stateful simulation as `scene-runner`, and the runtime adopts
+      the composer's default curves and curve sanitation
 - [ ] Match effect rendering between preview and runtime: glow, fog, tint,
       and additive vs alpha blending
 - [ ] Match coordinate space, scaling, and aspect handling between the
       preview viewport and the output surface
-- [ ] Match particle occluder/landing-surface behavior between preview and
-      runtime, including custom drawn regions and polygon particle areas
+- [x] Match particle occluder/landing-surface behavior between preview and
+      runtime, including custom drawn regions and polygon particle areas —
+      landing is now permanent with the runtime's crossing detection and
+      slide, and blocker rects are evaluated at time 0 on both sides
 - [ ] Evaluate replacing the Canvas2D preview with a shared GPU path (WebGPU
       port of the runner pipeline, or preview frames rendered by the native
       scene engine) so parity holds by construction instead of by discipline

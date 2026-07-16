@@ -1736,6 +1736,117 @@ fn resolve_emitter_max_life(emitter: &backlayer_types::SceneEmitterNode) -> f32 
         .max(resolve_emitter_min_life(emitter))
 }
 
+fn default_emitter_size_curve(preset: &SceneEmitterPreset) -> Vec<SceneCurvePoint> {
+    let points: &[(f32, f32)] = match preset {
+        SceneEmitterPreset::Rain => &[(0.0, 0.7), (1.0, 1.0)],
+        SceneEmitterPreset::Snow => &[(0.0, 0.8), (0.5, 1.0), (1.0, 0.85)],
+        SceneEmitterPreset::Dust => &[(0.0, 0.55), (0.5, 1.0), (1.0, 1.2)],
+        SceneEmitterPreset::Embers => &[(0.0, 0.7), (0.55, 1.0), (1.0, 0.35)],
+    };
+    points
+        .iter()
+        .map(|(x, y)| SceneCurvePoint { x: *x, y: *y })
+        .collect()
+}
+
+fn default_emitter_alpha_curve(preset: &SceneEmitterPreset) -> Vec<SceneCurvePoint> {
+    let points: &[(f32, f32)] = match preset {
+        SceneEmitterPreset::Rain => &[(0.0, 0.9), (1.0, 0.3)],
+        SceneEmitterPreset::Snow => &[(0.0, 0.25), (0.18, 0.7), (1.0, 0.1)],
+        SceneEmitterPreset::Dust => &[(0.0, 0.1), (0.35, 0.55), (1.0, 0.0)],
+        SceneEmitterPreset::Embers => &[(0.0, 0.25), (0.2, 1.0), (1.0, 0.0)],
+    };
+    points
+        .iter()
+        .map(|(x, y)| SceneCurvePoint { x: *x, y: *y })
+        .collect()
+}
+
+fn default_emitter_color_curve(preset: &SceneEmitterPreset) -> Vec<SceneColorStop> {
+    let stops: &[(f32, &str)] = match preset {
+        SceneEmitterPreset::Rain => &[(0.0, "#e1f1ff"), (1.0, "#7bb7ff")],
+        SceneEmitterPreset::Snow => &[(0.0, "#ffffff"), (1.0, "#dbe8ff")],
+        SceneEmitterPreset::Dust => &[(0.0, "#fff1d9"), (1.0, "#d5b98e")],
+        SceneEmitterPreset::Embers => &[(0.0, "#fff1af"), (0.55, "#ff8b4a"), (1.0, "#72250b")],
+    };
+    stops
+        .iter()
+        .map(|(x, color_hex)| SceneColorStop {
+            x: *x,
+            color_hex: (*color_hex).to_string(),
+        })
+        .collect()
+}
+
+// Mirrors the composer's curve sanitation: clamp, sort by x, and pad the
+// endpoints so the curve always covers the full 0..1 life range.
+fn resolve_scalar_curve(
+    points: &[SceneCurvePoint],
+    fallback: Vec<SceneCurvePoint>,
+) -> Vec<SceneCurvePoint> {
+    let source = if points.is_empty() {
+        fallback
+    } else {
+        points.to_vec()
+    };
+    let mut next: Vec<SceneCurvePoint> = source
+        .iter()
+        .map(|point| SceneCurvePoint {
+            x: point.x.clamp(0.0, 1.0),
+            y: point.y.clamp(0.0, 2.5),
+        })
+        .collect();
+    next.sort_by(|left, right| {
+        left.x
+            .partial_cmp(&right.x)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    if next.first().map(|point| point.x) != Some(0.0) {
+        let y = next.first().map(|point| point.y).unwrap_or(1.0);
+        next.insert(0, SceneCurvePoint { x: 0.0, y });
+    }
+    if next.last().map(|point| point.x) != Some(1.0) {
+        let y = next.last().map(|point| point.y).unwrap_or(1.0);
+        next.push(SceneCurvePoint { x: 1.0, y });
+    }
+    next
+}
+
+fn resolve_color_curve(points: &[SceneColorStop], fallback: Vec<SceneColorStop>) -> Vec<SceneColorStop> {
+    let source = if points.is_empty() {
+        fallback
+    } else {
+        points.to_vec()
+    };
+    let mut next: Vec<SceneColorStop> = source
+        .iter()
+        .map(|stop| SceneColorStop {
+            x: stop.x.clamp(0.0, 1.0),
+            color_hex: stop.color_hex.clone(),
+        })
+        .collect();
+    next.sort_by(|left, right| {
+        left.x
+            .partial_cmp(&right.x)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    if next.first().map(|stop| stop.x) != Some(0.0) {
+        let color_hex = next
+            .first()
+            .map(|stop| stop.color_hex.clone())
+            .unwrap_or_else(|| "#ffffff".to_string());
+        next.insert(0, SceneColorStop { x: 0.0, color_hex });
+    }
+    if next.last().map(|stop| stop.x) != Some(1.0) {
+        let color_hex = next
+            .last()
+            .map(|stop| stop.color_hex.clone())
+            .unwrap_or_else(|| "#ffffff".to_string());
+        next.push(SceneColorStop { x: 1.0, color_hex });
+    }
+    next
+}
+
 fn default_effect_color_hex(effect: &SceneEffectKind) -> &'static str {
     match effect {
         SceneEffectKind::Glow => "#ffc785",
@@ -2107,14 +2218,25 @@ fn build_particle_instances(scene: &NativeSceneRuntime) -> Vec<ParticleInstance>
         else {
             continue;
         };
+        let size_curve = resolve_scalar_curve(
+            &emitter.size_curve,
+            default_emitter_size_curve(&emitter.preset),
+        );
+        let alpha_curve = resolve_scalar_curve(
+            &emitter.alpha_curve,
+            default_emitter_alpha_curve(&emitter.preset),
+        );
+        let color_curve = resolve_color_curve(
+            &emitter.color_curve,
+            default_emitter_color_curve(&emitter.preset),
+        );
         for particle in &state.particles {
             let progress = (particle.life / particle.max_life).clamp(0.0, 1.0);
             let life_t = 1.0 - progress;
-            let alpha_curve = evaluate_scalar_curve(&emitter.alpha_curve, progress, life_t);
+            let alpha_curve = evaluate_scalar_curve(&alpha_curve, progress, life_t);
             let alpha = (particle.alpha * alpha_curve).clamp(0.0, 1.0);
-            let size_curve = evaluate_scalar_curve(&emitter.size_curve, progress, 1.0);
-            let color =
-                evaluate_color_curve(&emitter.color_curve, progress, parse_emitter_color(emitter));
+            let size_curve = evaluate_scalar_curve(&size_curve, progress, 1.0);
+            let color = evaluate_color_curve(&color_curve, progress, parse_emitter_color(emitter));
             let base_radius = (particle.size * size_curve).max(1.0);
             let render_angle = rendered_particle_angle_radians(emitter, particle.vx, particle.vy);
             let (size_x, size_y, angle, shape, alpha_scale) = match emitter.preset {

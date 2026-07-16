@@ -3076,6 +3076,7 @@ function ComposerEnginePreview({
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const viewportRef = useRef<HTMLDivElement | null>(null)
   const loadedImagesRef = useRef<Map<string, HTMLImageElement>>(new Map())
+  const emitterSimStatesRef = useRef<Map<string, PreviewEmitterSimState>>(new Map())
   const interactionRef = useRef<PreviewInteraction | null>(null)
   const nodesRef = useRef(nodes)
   const selectedNodeRef = useRef(selectedNode)
@@ -3231,6 +3232,7 @@ function ComposerEnginePreview({
           }
           const frameIntervalMs = 1000 / (interactionActive ? 20 : 24)
           if (now - lastRenderedAt >= frameIntervalMs) {
+            const dt = lastRenderedAt === 0 ? 1 / 24 : Math.min((now - lastRenderedAt) / 1000, 0.1)
             drawComposerSceneFrame(
               context,
               imageMap,
@@ -3238,6 +3240,8 @@ function ComposerEnginePreview({
               selectedNodeRef.current,
               dragParticleRegionRef.current,
               (now - startedAt) / 1000,
+              emitterSimStatesRef.current,
+              dt,
             )
             lastRenderedAt = now
           }
@@ -4511,6 +4515,7 @@ function ParticlePreviewPanel({
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const baseImageRef = useRef<HTMLImageElement | null>(null)
+  const simStateRef = useRef<PreviewEmitterSimState | null>(null)
 
   useEffect(() => {
     if (!baseImageUrl) { baseImageRef.current = null; return }
@@ -4532,6 +4537,7 @@ function ParticlePreviewPanel({
       if (disposed) return
       if (!documentVisible) { frame = window.requestAnimationFrame(render); return }
       if (now - lastRenderedAt < frameIntervalMs) { frame = window.requestAnimationFrame(render); return }
+      const dt = lastRenderedAt === 0 ? 1 / 24 : Math.min((now - lastRenderedAt) / 1000, 0.1)
       lastRenderedAt = now
       if (canvas.width !== 960 || canvas.height !== 540) {
         canvas.width = 960
@@ -4548,7 +4554,10 @@ function ParticlePreviewPanel({
         context.fillRect(0, 0, canvas.width, canvas.height)
         drawPreviewGrid(context, canvas.width, canvas.height)
       }
-      drawComposerEmitterNode(context, new Map<string, HTMLImageElement>(), node, [], now / 1000)
+      if (!simStateRef.current || simStateRef.current.preset !== node.preset) {
+        simStateRef.current = createPreviewEmitterSimState(node)
+      }
+      drawComposerEmitterNode(context, new Map<string, HTMLImageElement>(), node, [], simStateRef.current, dt)
       frame = window.requestAnimationFrame(render)
     }
     frame = window.requestAnimationFrame(render)
@@ -4743,13 +4752,17 @@ function drawComposerSceneFrame(
   selectedNode: SceneNode | null,
   draftParticleRegion: SceneNormalizedRect | null,
   timeSeconds: number,
+  emitterSimStates: Map<string, PreviewEmitterSimState>,
+  dt: number,
 ) {
   const width = context.canvas.width
   const height = context.canvas.height
   context.clearRect(0, 0, width, height)
   context.fillStyle = '#05070a'
   context.fillRect(0, 0, width, height)
-  const particleBlockers = buildComposerParticleBlockers(images, nodes, width, height, timeSeconds)
+  // scene-runner evaluates blocker rects at time 0 (no behavior animation),
+  // so the preview does the same.
+  const particleBlockers = buildComposerParticleBlockers(images, nodes, width, height, 0)
 
   for (const node of nodes) {
     if (!node.enabled) {
@@ -4768,9 +4781,15 @@ function drawComposerSceneFrame(
   // scene-runner draws all particles in a single pass after sprites and
   // effects, so they always sit on top regardless of node order.
   for (const node of nodes) {
-    if (node.kind === 'emitter' && node.enabled) {
-      drawComposerEmitterNode(context, images, node, particleBlockers, timeSeconds)
+    if (node.kind !== 'emitter' || !node.enabled) {
+      continue
     }
+    let state = emitterSimStates.get(node.id)
+    if (!state || state.preset !== node.preset) {
+      state = createPreviewEmitterSimState(node)
+      emitterSimStates.set(node.id, state)
+    }
+    drawComposerEmitterNode(context, images, node, particleBlockers, state, dt)
   }
 
   if (selectedNode?.kind === 'sprite') {
@@ -5093,9 +5112,10 @@ function drawComposerEmitterNode(
   images: Map<string, HTMLImageElement>,
   node: Extract<SceneNode, { kind: 'emitter' }>,
   particleBlockers: ComposerParticleBlocker[],
-  timeSeconds: number,
+  state: PreviewEmitterSimState,
+  dt: number,
 ) {
-  const particles = buildComposerEmitterParticles(node, context.canvas.width, context.canvas.height, particleBlockers, timeSeconds)
+  const particles = buildComposerEmitterParticles(node, context.canvas.width, context.canvas.height, particleBlockers, state, dt)
   const particleImageKey = resolveEmitterParticleImageKey(node)
   const particleImage = particleImageKey ? images.get(particleImageKey) ?? null : null
   context.save()
@@ -5138,17 +5158,17 @@ function buildComposerEmitterParticles(
   width: number,
   height: number,
   particleBlockers: ComposerParticleBlocker[],
-  timeSeconds: number,
+  state: PreviewEmitterSimState,
+  dt: number,
 ) {
-  const averageLife = (resolveEmitterMinLife(node) + resolveEmitterMaxLife(node)) / 2
-  const count = Math.max(12, Math.min(node.max_particles, Math.round(node.emission_rate * averageLife)))
+  stepComposerEmitterSim(node, state, width, height, particleBlockers, dt)
   const sizeCurve = resolveScalarCurve(node.size_curve, defaultEmitterSizeCurve(node.preset))
   const alphaCurve = resolveScalarCurve(node.alpha_curve, defaultEmitterAlphaCurve(node.preset))
   const colorCurve = resolveColorCurve(node.color_curve, defaultEmitterColorCurve(node.preset))
+  const textured = resolveEmitterParticleImageKey(node) !== null
   const particles: Array<{
     x: number
     y: number
-    radius: number
     sizeX: number
     sizeY: number
     angle: number
@@ -5158,72 +5178,38 @@ function buildComposerEmitterParticles(
     blue: number
     shape: 'circle' | 'streak' | 'texture'
   }> = []
-  const originX = resolveEmitterOriginX(node) * width
-  const originY = resolveEmitterOriginY(node) * height
-  const directionRadians = (resolveEmitterDirectionDeg(node) * Math.PI) / 180
-  const textured = resolveEmitterParticleImageKey(node) !== null
 
-  for (let index = 0; index < count; index += 1) {
-    let seed = stablePreviewSeed(index, node)
-    const random = () => nextPreviewRandom(seed = nextPreviewSeed(seed))
-    const spawnPosition = sampleEmitterPosition(node, width, height, originX, originY, random)
-    const spreadRadians = (node.spread * Math.PI) / 180
-    const angle = directionRadians + ((random() - 0.5) * spreadRadians)
-    const speed = resolveEmitterMinSpeed(node) + (random() * (resolveEmitterMaxSpeed(node) - resolveEmitterMinSpeed(node)))
-    const maxLife = resolveEmitterMinLife(node) + (random() * (resolveEmitterMaxLife(node) - resolveEmitterMinLife(node)))
-    const size = node.size * (0.55 + random() * 0.7)
-    const alphaBase = node.opacity * (0.55 + random() * 0.45)
-    const phase = random() * maxLife
-    const age = (timeSeconds + phase) % maxLife
-    const dragScale = Math.max(0, 1 - (node.drag * age * 0.08))
-    const vx = speed * Math.cos(angle) * dragScale
-    const vy = speed * Math.sin(angle) * dragScale
-    const x = spawnPosition.x + vx * age + (0.5 * node.gravity_x * age * age)
-    let y = spawnPosition.y + vy * age + (0.5 * node.gravity_y * age * age)
-    const progress = Math.min(1, age / maxLife)
-    const sizeScale = evaluateScalarCurve(sizeCurve, progress)
-    const alpha = Math.max(0, alphaBase * evaluateScalarCurve(alphaCurve, progress))
+  for (const particle of state.particles) {
+    const progress = clamp01(particle.life / Math.max(particle.maxLife, 0.0001))
+    const alpha = clamp01(particle.alpha * evaluateScalarCurve(alphaCurve, progress))
     if (alpha <= 0) {
       continue
     }
-    const radius = Math.max(1, size * sizeScale)
-    const collision = resolveComposerParticleCollision(node, particleBlockers, x, y, radius)
-    if (collision === 'discard') {
-      continue
-    }
-    if (typeof collision === 'number') {
-      y = collision
-    }
+    const sizeScale = evaluateScalarCurve(sizeCurve, progress)
     const { red, green, blue } = evaluateColorCurve(colorCurve, progress, resolveEmitterColorHex(node))
-    const particleShape = node.preset === 'rain' && !textured ? 'streak' : textured ? 'texture' : 'circle'
-    const renderAngle = resolveRenderedParticleAngleRad(node, vx, vy)
+    const baseRadius = Math.max(particle.size * sizeScale, 1)
+    const renderAngle = resolveRenderedParticleAngleRad(node, particle.vx, particle.vy)
     const sizeX = node.preset === 'rain'
-      ? size * sizeScale * 1.2
-      : node.preset === 'snow'
-        ? size * sizeScale * 2.0
-        : node.preset === 'dust'
-          ? size * sizeScale * 2.2
-          : size * sizeScale * 2.0
+      ? baseRadius * 1.2
+      : node.preset === 'dust'
+        ? baseRadius * 2.2
+        : baseRadius * 2.0
     const sizeY = node.preset === 'rain'
-      ? size * sizeScale * 8.5
-      : node.preset === 'snow'
-        ? size * sizeScale * 2.0
-        : node.preset === 'dust'
-          ? size * sizeScale * 2.2
-          : size * sizeScale * 2.0
+      ? baseRadius * 8.5
+      : node.preset === 'dust'
+        ? baseRadius * 2.2
+        : baseRadius * 2.0
     const occluded = node.preset === 'rain'
       ? isComposerParticleSegmentOccluded(
         particleBlockers,
-        { x: x - (Math.cos(renderAngle + (Math.PI / 2)) * sizeY * 0.5), y: y - (Math.sin(renderAngle + (Math.PI / 2)) * sizeY * 0.5) },
-        { x: x + (Math.cos(renderAngle + (Math.PI / 2)) * sizeY * 0.5), y: y + (Math.sin(renderAngle + (Math.PI / 2)) * sizeY * 0.5) },
+        { x: particle.x - (Math.cos(renderAngle + (Math.PI / 2)) * sizeY * 0.5), y: particle.y - (Math.sin(renderAngle + (Math.PI / 2)) * sizeY * 0.5) },
+        { x: particle.x + (Math.cos(renderAngle + (Math.PI / 2)) * sizeY * 0.5), y: particle.y + (Math.sin(renderAngle + (Math.PI / 2)) * sizeY * 0.5) },
         Math.max(sizeX, 1.5) * 0.5,
       )
-      : isComposerParticleOccluded(particleBlockers, x, y, Math.max(sizeX, sizeY) * 0.5)
-
+      : isComposerParticleOccluded(particleBlockers, particle.x, particle.y, Math.max(sizeX, sizeY) * 0.5)
     if (occluded) {
       continue
     }
-
     const alphaScale = node.preset === 'rain'
       ? 0.92
       : node.preset === 'snow'
@@ -5232,9 +5218,8 @@ function buildComposerEmitterParticles(
           ? 0.7
           : 1
     particles.push({
-      x,
-      y,
-      radius: node.preset === 'rain' ? 0 : radius,
+      x: particle.x,
+      y: particle.y,
       sizeX,
       sizeY,
       angle: renderAngle,
@@ -5242,7 +5227,7 @@ function buildComposerEmitterParticles(
       red,
       green,
       blue,
-      shape: particleShape,
+      shape: node.preset === 'rain' && !textured ? 'streak' : textured ? 'texture' : 'circle',
     })
   }
 
@@ -5259,6 +5244,168 @@ type ComposerParticleBlocker = {
   surface: boolean
 }
 
+// Stateful particle simulation mirroring scene-runner's NativeSceneRuntime:
+// persistent particles, an emission accumulator, burst + warm start, per-frame
+// velocity/gravity/drag integration, and permanent surface landing.
+type PreviewSimParticle = {
+  x: number
+  y: number
+  vx: number
+  vy: number
+  life: number
+  maxLife: number
+  size: number
+  alpha: number
+  landed: boolean
+}
+
+type PreviewEmitterSimState = {
+  preset: SceneEmitterPreset
+  accumulator: number
+  seed: number
+  burstFired: boolean
+  particles: PreviewSimParticle[]
+}
+
+function createPreviewEmitterSimState(node: SceneEmitterNode): PreviewEmitterSimState {
+  let hash = 2166136261
+  const text = `${node.id}:${node.preset}`
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index)
+    hash = Math.imul(hash, 16777619)
+  }
+  return {
+    preset: node.preset,
+    accumulator: 0,
+    seed: hash >>> 0,
+    burstFired: false,
+    particles: [],
+  }
+}
+
+function spawnPreviewParticle(
+  node: SceneEmitterNode,
+  width: number,
+  height: number,
+  random: () => number,
+  ageOverride: number | null,
+): PreviewSimParticle {
+  const originX = resolveEmitterOriginX(node) * width
+  const originY = resolveEmitterOriginY(node) * height
+  const spawn = sampleEmitterPosition(node, width, height, originX, originY, random)
+  const spreadRadians = (node.spread * Math.PI) / 180
+  const baseAngle = (resolveEmitterDirectionDeg(node) * Math.PI) / 180
+  const angle = baseAngle + ((random() - 0.5) * spreadRadians)
+  const minSpeed = resolveEmitterMinSpeed(node)
+  const maxSpeed = resolveEmitterMaxSpeed(node)
+  const speed = minSpeed + (random() * (maxSpeed - minSpeed))
+  const minLife = resolveEmitterMinLife(node)
+  const maxLife = resolveEmitterMaxLife(node)
+  const maxLifeValue = minLife + (random() * (maxLife - minLife))
+  const age = Math.min(Math.max(ageOverride ?? 0, 0), maxLifeValue)
+  const dragScale = Math.max(0, 1 - (node.drag * age * 0.08))
+  const vx = speed * Math.cos(angle) * dragScale
+  const vy = speed * Math.sin(angle) * dragScale
+  return {
+    x: spawn.x + (vx * age) + (0.5 * node.gravity_x * age * age),
+    y: spawn.y + (vy * age) + (0.5 * node.gravity_y * age * age),
+    vx,
+    vy,
+    life: age,
+    maxLife: maxLifeValue,
+    size: node.size * (0.55 + random() * 0.7),
+    alpha: node.opacity * (0.55 + random() * 0.45),
+    landed: false,
+  }
+}
+
+function resolvePreviewSurfaceCollision(
+  node: SceneEmitterNode,
+  particle: PreviewSimParticle,
+  previousY: number,
+  blockers: ComposerParticleBlocker[],
+) {
+  const radius = Math.max(particle.size, 1)
+  let surface: number | null = null
+  for (const blocker of blockers) {
+    if (!blocker.surface) {
+      continue
+    }
+    const surfaceY = composerBlockerSurfaceY(blocker, particle.x)
+    if (surfaceY === null) {
+      continue
+    }
+    if (previousY <= surfaceY && particle.y + radius >= surfaceY && (surface === null || surfaceY < surface)) {
+      surface = surfaceY
+    }
+  }
+  if (surface === null) {
+    return
+  }
+  if (node.preset === 'snow' || node.preset === 'dust') {
+    particle.y = surface - radius
+    particle.vx *= 0.15
+    particle.vy = 0
+    particle.landed = true
+  } else {
+    particle.life = particle.maxLife
+  }
+}
+
+function stepComposerEmitterSim(
+  node: SceneEmitterNode,
+  state: PreviewEmitterSimState,
+  width: number,
+  height: number,
+  blockers: ComposerParticleBlocker[],
+  dt: number,
+) {
+  const maxParticles = Math.max(0, node.max_particles)
+  const random = () => {
+    state.seed = nextPreviewSeed(state.seed)
+    return nextPreviewRandom(state.seed)
+  }
+
+  if (node.burst_on_start && !state.burstFired) {
+    const burstCount = Math.min(node.burst_count, maxParticles)
+    for (let index = 0; index < burstCount && state.particles.length < maxParticles; index += 1) {
+      state.particles.push(spawnPreviewParticle(node, width, height, random, null))
+    }
+    state.burstFired = true
+  }
+
+  if (state.particles.length === 0 && node.emission_rate > 0) {
+    const averageLife = (resolveEmitterMinLife(node) + resolveEmitterMaxLife(node)) * 0.5
+    const warmCount = Math.min(Math.round(node.emission_rate * averageLife), maxParticles)
+    for (let index = 0; index < warmCount && state.particles.length < maxParticles; index += 1) {
+      state.particles.push(spawnPreviewParticle(node, width, height, random, averageLife * random()))
+    }
+  }
+
+  state.accumulator += node.emission_rate * dt
+  const spawnCount = Math.floor(state.accumulator)
+  state.accumulator -= spawnCount
+  for (let index = 0; index < spawnCount && state.particles.length < maxParticles; index += 1) {
+    state.particles.push(spawnPreviewParticle(node, width, height, random, null))
+  }
+
+  for (const particle of state.particles) {
+    if (!particle.landed) {
+      particle.vx += node.gravity_x * dt
+      particle.vy += node.gravity_y * dt
+      const dragScale = Math.min(1, Math.max(0, 1 - (node.drag * dt * 0.08)))
+      particle.vx *= dragScale
+      particle.vy *= dragScale
+      const previousY = particle.y
+      particle.x += particle.vx * dt
+      particle.y += particle.vy * dt
+      resolvePreviewSurfaceCollision(node, particle, previousY, blockers)
+    }
+    particle.life += dt
+  }
+  state.particles = state.particles.filter((particle) => particle.life < particle.maxLife)
+}
+
 function buildComposerParticleBlockers(
   images: Map<string, HTMLImageElement>,
   nodes: SceneNode[],
@@ -5266,14 +5413,6 @@ function buildComposerParticleBlockers(
   height: number,
   timeSeconds: number,
 ): ComposerParticleBlocker[] {
-  const canvas = document.createElement('canvas')
-  canvas.width = Math.max(1, width)
-  canvas.height = Math.max(1, height)
-  const context = canvas.getContext('2d')
-  if (!context) {
-    return []
-  }
-
   const blockers: ComposerParticleBlocker[] = []
   for (const node of nodes) {
     if (node.kind !== 'sprite' || !node.enabled) {
@@ -5286,7 +5425,7 @@ function buildComposerParticleBlockers(
     if (!image) {
       continue
     }
-    const layout = resolveComposerSpriteLayout(context, image, node, timeSeconds)
+    const layout = resolveComposerSpriteLayoutFromBounds(width, height, image, node, timeSeconds)
     const region = resolveSpriteParticleRegionRect(layout, node.particle_region ?? null)
     blockers.push({
       x: region.x,
@@ -5335,26 +5474,6 @@ function isComposerParticleSegmentOccluded(
 ) {
   return blockers.some((blocker) => blocker.occluder
     && composerBlockerContainsSegment(blocker, start, end, thicknessRadius))
-}
-
-function resolveComposerParticleCollision(
-  node: Extract<SceneNode, { kind: 'emitter' }>,
-  blockers: ComposerParticleBlocker[],
-  x: number,
-  y: number,
-  radius: number,
-) {
-  const surface = blockers
-    .map((blocker) => ({ blocker, surfaceY: composerBlockerSurfaceY(blocker, x) }))
-    .filter((entry): entry is { blocker: ComposerParticleBlocker; surfaceY: number } => entry.blocker.surface && entry.surfaceY !== null && y >= entry.surfaceY && y <= entry.blocker.y + entry.blocker.height)
-    .sort((left, right) => left.surfaceY - right.surfaceY)[0]
-  if (!surface) {
-    return null
-  }
-  if (node.preset === 'snow' || node.preset === 'dust') {
-    return surface.surfaceY - radius
-  }
-  return 'discard'
 }
 
 function composerBlockerContains(blocker: ComposerParticleBlocker, x: number, y: number, radius: number) {
@@ -5620,16 +5739,6 @@ function evaluateColorCurve(curve: SceneColorStop[], x: number, fallback: string
 function smoothstep(edge0: number, edge1: number, x: number) {
   const t = Math.min(1, Math.max(0, (x - edge0) / Math.max(edge1 - edge0, 0.00001)))
   return t * t * (3 - 2 * t)
-}
-
-function stablePreviewSeed(index: number, node: Extract<SceneNode, { kind: 'emitter' }>) {
-  let hash = 2166136261 ^ index
-  const text = `${node.id}:${node.preset}:${node.emission_rate}:${node.speed}:${node.spread}:${resolveEmitterOriginX(node)}:${resolveEmitterOriginY(node)}:${resolveEmitterDirectionDeg(node)}:${resolveEmitterColorHex(node)}`
-  for (let i = 0; i < text.length; i += 1) {
-    hash ^= text.charCodeAt(i)
-    hash = Math.imul(hash, 16777619)
-  }
-  return hash >>> 0
 }
 
 function nextPreviewSeed(seed: number) {

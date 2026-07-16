@@ -23,6 +23,8 @@ The format is intentionally simple for now and follows an `Unreleased` section p
 
 ### Changed
 
+- Scene Composer preview particles now run the same stateful simulation as `scene-runner` — burst emission, warm start, per-frame gravity/drag integration, and permanent surface landing now behave in the editor exactly as they do on the wallpaper
+- `scene-runner` now applies the composer's per-preset default size/alpha/color curves and curve sanitation when a scene document omits or misorders them
 - Product docs now carry a milestone-based roadmap targeting a first public v0.3.0 release, with Scene Composer ↔ `scene-runner` visual parity elevated to a headline focus and KDE Plasma bridge work sequenced after the Hyprland MVP ships
 - Built-in asset discovery now works for installed package layouts such as `/usr/share/backlayer/assets`, not only workspace checkouts
 - KDE Plasma bridge foundation now uses the wallpaper-specific QML import module and safer shell-restart fallback ordering in the installer docs/script

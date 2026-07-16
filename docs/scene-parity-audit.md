@@ -46,10 +46,30 @@ Preview fixes:
 - **3.3** vignette uses the runtime's radius fraction (0.42 of the
   half-diagonal) and `^1.8` falloff
 
-Still open from this audit: 1.1 (particle model), 1.2 (pixel units),
-1.3 (blending space), 1.6 (time base), 1.7 (randomness), 4.1/4.2 (curve
-fallbacks and sanitation), 4.4 (region/line clamps), 4.5 (particle sprites),
-and the low-severity items in 2.4 and 3.4.
+## Fix log — round 2 (2026-07-16)
+
+- **1.1 (structural)** the preview now runs the same stateful particle
+  simulation as the runtime: persistent per-emitter state, emission
+  accumulator, burst emission, warm start with random ages, per-frame
+  velocity/gravity/drag integration, frame-to-frame surface-crossing
+  detection, permanent landing with the `vx·0.15` slide, and the
+  `max_particles` cap (the forced 12-particle minimum is gone). The stateless
+  `(time + phase) % life` resampling was removed.
+- **4.1 + 4.2** the runtime now applies the composer's per-preset default
+  size/alpha/color curves when a document omits them, and sanitizes curve
+  input the same way the preview does (clamp x to 0..1 and y to 0..2.5, sort
+  by x, pad endpoints to x = 0 and x = 1).
+- **New small finding, fixed**: the preview evaluated occluder/surface
+  blocker rects with live behavior animation while the runtime evaluates them
+  at time 0; the preview now uses time 0 as well.
+- **1.6 (partial)** the preview simulation now integrates with a real
+  per-frame dt (wall-clock, clamped to 100 ms) instead of phase sampling;
+  the runtime's nominal-dt-per-rendered-frame behavior is still the
+  remaining time-base difference.
+
+Still open from this audit: 1.2 (pixel units), 1.3 (blending space),
+1.6 (runtime time base), 1.7 (randomness), 4.4 (region/line clamps),
+4.5 (particle sprites), and the low-severity items in 2.4 and 3.4.
 
 ## How the two renderers relate
 
