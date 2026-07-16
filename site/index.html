@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Backlayer — Animated wallpapers for the Linux desktop</title>
+<meta name="description" content="Backlayer is an animated wallpaper runtime for Linux — a daemon, Wayland layer-shell surfaces, dedicated renderers, and a native Scene Composer. Hyprland is the first supported compositor.">
+<link rel="canonical" href="https://madsendev.github.io/backlayer/">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Backlayer — Animated wallpapers for the Linux desktop">
+<meta property="og:description" content="An animated wallpaper runtime for Linux: daemon, Wayland layer-shell surfaces, dedicated renderers, and a native Scene Composer. Hyprland-first.">
+<meta property="og:url" content="https://madsendev.github.io/backlayer/">
+<meta property="og:image" content="https://madsendev.github.io/backlayer/icon-512.png">
+<meta name="twitter:card" content="summary">
+<link rel="icon" type="image/png" href="./favicon.png">
+<link rel="apple-touch-icon" href="./icon-512.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#0b0e1a;color:#e8e9f2;font-family:'Space Grotesk','Segoe UI',sans-serif;-webkit-font-smoothing:antialiased}
+a{color:#f0a06a;text-decoration:none}
+a:hover{color:#ffbe8a}
+.mono{font-family:'IBM Plex Mono',monospace}
+.nav-link{color:#9aa0b8;white-space:nowrap}
+.nav-link:hover{color:#e8e9f2}
+.gh-btn{display:inline-flex;align-items:center;gap:8px;padding:7px 12px;border:1px solid #2a3050;border-radius:8px;color:#e8e9f2;font-weight:500;white-space:nowrap}
+.gh-btn:hover{border-color:#f0a06a;color:#ffbe8a}
+.btn-primary{display:inline-flex;align-items:center;gap:8px;padding:12px 22px;border-radius:10px;background:linear-gradient(135deg,#f6a05e,#e46a9f);color:#14101c;font-weight:600;font-size:15px}
+.btn-primary:hover{color:#14101c;filter:brightness(1.1)}
+.btn-secondary{display:inline-flex;align-items:center;gap:8px;padding:12px 22px;border-radius:10px;border:1px solid #2a3050;color:#e8e9f2;font-weight:500;font-size:15px}
+.btn-secondary:hover{color:#e8e9f2;border-color:#5a63d8}
+.tech-chip{padding:5px 10px;border:1px solid #232842;border-radius:6px}
+.card{border:1px solid #232842;border-radius:12px;background:#10142a;display:flex;flex-direction:column;transition:transform 0.25s ease,border-color 0.25s ease}
+.card:hover{border-color:#3a4170;transform:translateY(-4px)}
+.card h3{margin:0;font-weight:600}
+.card p{margin:0;color:#9aa0b8;text-wrap:pretty}
+.kicker{margin:0 0 8px;font-size:12px;font-weight:600;letter-spacing:0.22em;text-transform:uppercase}
+.section-title{margin:0 0 28px;font-size:clamp(24px,4vw,34px);font-weight:700;letter-spacing:-0.01em}
+.section{max-width:1080px;margin:0 auto;padding:clamp(32px,6vw,72px) 24px}
+.fx-chip{padding:4px 9px;border-radius:6px;font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:0.1em;cursor:pointer;transition:all 0.2s ease}
+.fx-chip.on{background:rgba(10,12,26,0.72);color:#ffd9a8;border:1px solid rgba(255,190,138,0.55)}
+.fx-chip.off{background:rgba(10,12,26,0.3);color:rgba(255,255,255,0.45);border:1px solid rgba(255,255,255,0.18)}
+.copy-btn{border:1px solid #2a3050;background:transparent;color:#9aa0b8;border-radius:6px;padding:4px 10px;font-size:11.5px;font-family:'Space Grotesk',sans-serif;cursor:pointer}
+.copy-btn:hover{color:#ffbe8a;border-color:#f0a06a}
+.footer-link{color:#9aa0b8}
+.footer-link:hover{color:#ffbe8a}
+@keyframes bl-drift1{0%,100%{transform:translate(-6%,0) scale(1)}50%{transform:translate(6%,4%) scale(1.08)}}
+@keyframes bl-drift2{0%,100%{transform:translate(4%,2%) scale(1.05)}50%{transform:translate(-5%,-3%) scale(1)}}
+@keyframes bl-drift3{0%,100%{transform:translate(0,3%) scale(1)}50%{transform:translate(3%,-4%) scale(1.1)}}
+@keyframes bl-ember{0%{transform:translate(0,0) scale(0.8);opacity:0}12%{opacity:0.95}100%{transform:translate(18px,-160px) scale(1.15);opacity:0}}
+@keyframes bl-ember2{0%{transform:translate(0,0) scale(0.9);opacity:0}12%{opacity:0.9}100%{transform:translate(-22px,-140px) scale(1.2);opacity:0}}
+@media (prefers-reduced-motion: reduce){.bl-wave,.bl-ember{animation:none !important}}
+</style>
+</head>
+<body>
+<div style="min-height:100vh;background:#0b0e1a;overflow-x:hidden">
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <linearGradient id="blSky" x1="0" y1="0" x2="0.6" y2="1">
+      <stop offset="0" stop-color="#ffc46b"></stop>
+      <stop offset="0.55" stop-color="#ff8fa3"></stop>
+      <stop offset="1" stop-color="#f47bd0"></stop>
+    </linearGradient>
+    <clipPath id="blClip"><rect x="10" y="10" width="124" height="124" rx="28"></rect></clipPath>
+    <g id="blLogoArt">
+      <rect x="0" y="0" width="144" height="144" rx="36" fill="#141828"></rect>
+      <g clip-path="url(#blClip)">
+        <rect x="10" y="10" width="124" height="124" fill="url(#blSky)"></rect>
+        <g>
+          <animateTransform attributeName="transform" type="translate" from="0 0" to="-72 0" dur="9s" repeatCount="indefinite"></animateTransform>
+          <path d="M0 52 Q18 38 36 52 T72 52 T108 52 T144 52 T180 52 T216 52 T252 52 T288 52 V150 H0 Z" fill="#c47ae0"></path>
+        </g>
+        <g>
+          <animateTransform attributeName="transform" type="translate" from="-72 0" to="0 0" dur="12s" repeatCount="indefinite"></animateTransform>
+          <path d="M0 76 Q18 88 36 76 T72 76 T108 76 T144 76 T180 76 T216 76 T252 76 T288 76 V150 H0 Z" fill="#7a6ae0"></path>
+        </g>
+        <g>
+          <animateTransform attributeName="transform" type="translate" from="0 0" to="-72 0" dur="15s" repeatCount="indefinite"></animateTransform>
+          <path d="M0 98 Q18 86 36 98 T72 98 T108 98 T144 98 T180 98 T216 98 T252 98 T288 98 V150 H0 Z" fill="#4a58c4"></path>
+        </g>
+        <g>
+          <animateTransform attributeName="transform" type="translate" from="-72 0" to="0 0" dur="18s" repeatCount="indefinite"></animateTransform>
+          <path d="M0 118 Q18 128 36 118 T72 118 T108 118 T144 118 T180 118 T216 118 T252 118 T288 118 V150 H0 Z" fill="#1a2450"></path>
+        </g>
+      </g>
+    </g>
+  </defs>
+</svg>
+
+<header style="display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px 16px;max-width:1080px;margin:0 auto;padding:16px 20px">
+  <div style="display:flex;align-items:center;gap:10px">
+    <svg viewBox="0 0 144 144" role="img" aria-label="Backlayer icon" style="width:32px;height:32px;display:block"><use href="#blLogoArt"></use></svg>
+    <span style="font-weight:700;font-size:18px;letter-spacing:0.01em">Backlayer</span>
+  </div>
+  <nav style="display:flex;align-items:center;flex-wrap:wrap;gap:8px 16px;font-size:14px">
+    <a href="#features" class="nav-link">Features</a>
+    <a href="#quickstart" class="nav-link">Quick start</a>
+    <a href="https://github.com/MadsenDev/backlayer" class="gh-btn">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"></path></svg>
+      GitHub</a>
+  </nav>
+</header>
+
+<section style="position:relative;overflow:hidden">
+  <canvas id="heroCanvas" aria-hidden="true" style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none"></canvas>
+  <div style="position:relative;max-width:1080px;margin:0 auto;padding:clamp(48px,9vw,110px) 24px clamp(64px,9vw,110px);text-align:center">
+    <div aria-hidden="true" style="position:absolute;inset:0;overflow:visible;pointer-events:none;filter:blur(60px);opacity:0.55">
+      <div class="bl-wave" style="position:absolute;left:5%;top:0;width:55%;height:60%;border-radius:50%;background:radial-gradient(ellipse, #f6a05e 0%, transparent 70%);animation:bl-drift1 14s ease-in-out infinite"></div>
+      <div class="bl-wave" style="position:absolute;right:0;top:10%;width:50%;height:65%;border-radius:50%;background:radial-gradient(ellipse, #e46a9f 0%, transparent 70%);animation:bl-drift2 17s ease-in-out infinite"></div>
+      <div class="bl-wave" style="position:absolute;left:25%;bottom:-10%;width:60%;height:60%;border-radius:50%;background:radial-gradient(ellipse, #5a63d8 0%, transparent 70%);animation:bl-drift3 20s ease-in-out infinite"></div>
+    </div>
+    <div style="position:relative;display:flex;flex-direction:column;align-items:center;gap:24px">
+      <svg viewBox="0 0 144 144" aria-hidden="true" style="width:clamp(72px,12vw,104px);height:clamp(72px,12vw,104px);border-radius:25%;box-shadow:0 12px 48px rgba(90,99,216,0.4);display:block"><use href="#blLogoArt"></use></svg>
+      <h1 style="margin:0;font-size:clamp(34px,7vw,60px);font-weight:700;line-height:1.08;letter-spacing:-0.02em;text-wrap:balance">Animated wallpapers<br>for the Linux desktop.</h1>
+      <p style="margin:0;max-width:560px;font-size:clamp(15px,2.4vw,18px);line-height:1.6;color:#9aa0b8;text-wrap:pretty">Backlayer is an animated wallpaper runtime for Linux — a daemon, Wayland layer-shell surfaces, dedicated renderers, and a native Scene Composer. Hyprland is the first supported compositor, with broader Linux support as the goal.</p>
+      <div style="display:flex;flex-wrap:wrap;justify-content:center;gap:12px">
+        <a href="#quickstart" class="btn-primary">Get started</a>
+        <a href="https://github.com/MadsenDev/backlayer" class="btn-secondary">View on GitHub</a>
+      </div>
+      <div class="mono" style="display:flex;flex-wrap:wrap;justify-content:center;gap:8px;font-size:12px;color:#6b7190">
+        <span class="tech-chip">Rust</span>
+        <span class="tech-chip">wgpu</span>
+        <span class="tech-chip">Wayland layer-shell</span>
+        <span class="tech-chip">Tauri + React</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="features" data-reveal class="section">
+  <p class="kicker" style="color:#f0a06a">Wallpaper kinds</p>
+  <h2 class="section-title">Four native renderer paths</h2>
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px">
+    <div class="card" style="padding:22px;gap:10px">
+      <div class="mono" style="width:38px;height:38px;border-radius:9px;background:#f6a05e;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:500;color:#14101c">img</div>
+      <h3 style="font-size:17px">Image</h3>
+      <p style="font-size:14px;line-height:1.55">Static wallpapers with per-assignment fit controls: cover, contain, stretch, or center.</p>
+    </div>
+    <div class="card" style="padding:22px;gap:10px">
+      <div class="mono" style="width:38px;height:38px;border-radius:9px;background:#e46a9f;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:500;color:#14101c">vid</div>
+      <h3 style="font-size:17px">Video</h3>
+      <p style="font-size:14px;line-height:1.55">Video wallpapers through a dedicated video-runner using ffmpeg and ffprobe, with libmpv on the roadmap.</p>
+    </div>
+    <div class="card" style="padding:22px;gap:10px">
+      <div class="mono" style="width:38px;height:38px;border-radius:9px;background:#8a5fd0;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:500;color:#14101c">wgsl</div>
+      <h3 style="font-size:17px">Shader</h3>
+      <p style="font-size:14px;line-height:1.55">WGSL shaders rendered with wgpu — static or animated with a built-in time/resolution uniform block.</p>
+    </div>
+    <div class="card" style="padding:22px;gap:10px">
+      <div class="mono" style="width:38px;height:38px;border-radius:9px;background:#5a63d8;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:500;color:#14101c">scn</div>
+      <h3 style="font-size:17px">Scene</h3>
+      <p style="font-size:14px;line-height:1.55">A real-time 2D scene graph with sprites, effects, and GPU-native particles, authored in the Scene Composer.</p>
+    </div>
+  </div>
+</section>
+
+<section data-reveal class="section">
+  <div style="border:1px solid #232842;border-radius:16px;background:linear-gradient(160deg,#141a38 0%,#10142a 60%);padding:clamp(24px,5vw,48px);display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:clamp(24px,4vw,48px);align-items:center">
+    <div style="display:flex;flex-direction:column;gap:14px">
+      <p class="kicker" style="margin:0;color:#e46a9f">Scene Composer</p>
+      <h2 style="margin:0;font-size:clamp(22px,3.6vw,30px);font-weight:700;letter-spacing:-0.01em;text-wrap:balance">Turn a still image into a living wallpaper</h2>
+      <p style="margin:0;font-size:15px;line-height:1.6;color:#9aa0b8;text-wrap:pretty">A full-screen editor for native scene wallpapers: sprite nodes, glow, vignette, scanlines and fog effects, plus particle emitters with shapes, burst emission, over-life curves and tint. Scenes save as single-file <span class="mono" style="font-size:13px;color:#f0a06a">.backlayer</span> assets.</p>
+    </div>
+    <div style="position:relative;border-radius:12px;overflow:hidden;border:1px solid #2a3050;aspect-ratio:16/10;background:linear-gradient(180deg,#f6a05e 0%,#e46a9f 30%,#8a5fd0 55%,#3d4bb0 78%,#141a44 100%)">
+      <div id="fxScan" aria-hidden="true" style="position:absolute;inset:0;background:repeating-linear-gradient(0deg,rgba(10,10,25,0.18) 0 2px,transparent 2px 6px);opacity:0.5"></div>
+      <div id="fxGlow" aria-hidden="true" class="bl-wave" style="position:absolute;left:10%;top:15%;width:50%;height:50%;border-radius:50%;background:radial-gradient(ellipse,rgba(255,220,170,0.5),transparent 70%);filter:blur(20px);animation:bl-drift2 9s ease-in-out infinite"></div>
+      <div id="fxEmbers" aria-hidden="true" style="position:absolute;inset:0;pointer-events:none"></div>
+      <div style="position:absolute;left:10px;top:10px;display:flex;flex-wrap:wrap;gap:6px">
+        <button class="fx-chip on" data-fx="fxGlow" type="button">GLOW</button>
+        <button class="fx-chip on" data-fx="fxScan" type="button">SCANLINES</button>
+        <button class="fx-chip on" data-fx="fxEmbers" type="button">EMITTER</button>
+      </div>
+      <span class="mono" style="position:absolute;right:10px;bottom:8px;font-size:10px;letter-spacing:0.08em;color:rgba(255,255,255,0.65);background:rgba(10,12,26,0.5);padding:3px 7px;border-radius:5px">tap nodes to toggle</span>
+    </div>
+  </div>
+</section>
+
+<section data-reveal class="section">
+  <p class="kicker" style="color:#f0a06a">Runtime</p>
+  <h2 class="section-title">A deliberate runtime, not a media player behind windows</h2>
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px">
+    <div class="card" style="padding:20px;gap:8px">
+      <h3 style="font-size:15.5px">Per-monitor assignment</h3>
+      <p style="font-size:13.5px;line-height:1.55">backlayerd maps stable monitor identifiers to wallpapers, surviving output-name changes across reconnects.</p>
+    </div>
+    <div class="card" style="padding:20px;gap:8px">
+      <h3 style="font-size:15.5px">Input passthrough</h3>
+      <p style="font-size:13.5px;line-height:1.55">Wallpapers live on background layer-shell surfaces — your desktop input is never intercepted.</p>
+    </div>
+    <div class="card" style="padding:20px;gap:8px">
+      <h3 style="font-size:15.5px">Power aware</h3>
+      <p style="font-size:13.5px;line-height:1.55">Pause on fullscreen, pause on battery, and FPS limiting are runtime rules from day one.</p>
+    </div>
+    <div class="card" style="padding:20px;gap:8px">
+      <h3 style="font-size:15.5px">Renderer supervision</h3>
+      <p style="font-size:13.5px;line-height:1.55">Dedicated renderer processes per wallpaper, supervised and restarted by the daemon on failure.</p>
+    </div>
+    <div class="card" style="padding:20px;gap:8px">
+      <h3 style="font-size:15.5px">systemd --user recovery</h3>
+      <p style="font-size:13.5px;line-height:1.55">A bundled user service gives login autostart and daemon recovery for day-to-day reliability.</p>
+    </div>
+    <div class="card" style="padding:20px;gap:8px">
+      <h3 style="font-size:15.5px">Single-file assets</h3>
+      <p style="font-size:13.5px;line-height:1.55">Native wallpapers pack into portable .backlayer files with an asset-relative manifest.</p>
+    </div>
+  </div>
+</section>
+
+<section id="quickstart" data-reveal class="section">
+  <p class="kicker" style="color:#e46a9f">Quick start</p>
+  <h2 class="section-title" style="margin-bottom:12px">Running in three commands</h2>
+  <p style="margin:0 0 24px;max-width:620px;font-size:14.5px;line-height:1.6;color:#9aa0b8;text-wrap:pretty">Requires Hyprland on Wayland, a Rust toolchain, Node.js, pnpm, and ffmpeg/ffprobe for video wallpapers. An Arch package layout and AUR-ready files ship under <span class="mono" style="font-size:13px;color:#f0a06a">packaging/</span>.</p>
+  <div style="display:flex;flex-direction:column;gap:12px;max-width:720px">
+    <div style="border:1px solid #232842;border-radius:10px;background:#0d1020;overflow:hidden">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:9px 14px;border-bottom:1px solid #1a1f38">
+        <span style="font-size:12px;color:#6b7190">Install dependencies</span>
+        <button class="copy-btn" type="button" data-cmd="pnpm install">Copy</button>
+      </div>
+      <pre class="mono" style="margin:0;padding:14px 16px;font-size:13.5px;line-height:1.5;color:#d8dcf0;overflow-x:auto"><code>pnpm install</code></pre>
+    </div>
+    <div style="border:1px solid #232842;border-radius:10px;background:#0d1020;overflow:hidden">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:9px 14px;border-bottom:1px solid #1a1f38">
+        <span style="font-size:12px;color:#6b7190">Run the daemon</span>
+        <button class="copy-btn" type="button" data-cmd="cargo run -p backlayerd -- --serve">Copy</button>
+      </div>
+      <pre class="mono" style="margin:0;padding:14px 16px;font-size:13.5px;line-height:1.5;color:#d8dcf0;overflow-x:auto"><code>cargo run -p backlayerd -- --serve</code></pre>
+    </div>
+    <div style="border:1px solid #232842;border-radius:10px;background:#0d1020;overflow:hidden">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:9px 14px;border-bottom:1px solid #1a1f38">
+        <span style="font-size:12px;color:#6b7190">Run the manager UI</span>
+        <button class="copy-btn" type="button" data-cmd="pnpm ui:tauri:dev">Copy</button>
+      </div>
+      <pre class="mono" style="margin:0;padding:14px 16px;font-size:13.5px;line-height:1.5;color:#d8dcf0;overflow-x:auto"><code>pnpm ui:tauri:dev</code></pre>
+    </div>
+  </div>
+  <p style="margin:20px 0 0;font-size:13.5px;color:#6b7190;max-width:620px;line-height:1.6">For login-time autostart, enable the bundled <span class="mono" style="font-size:12.5px">systemd --user</span> unit. See <a href="https://github.com/MadsenDev/backlayer/blob/main/docs/install.md">docs/install.md</a> for the full flow.</p>
+</section>
+
+<section data-reveal class="section">
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px">
+    <div class="card" style="padding:24px;gap:10px">
+      <h3 style="font-size:17px">KDE Plasma 6 <span style="font-size:11px;font-weight:500;color:#f0a06a;border:1px solid rgba(240,160,106,0.4);border-radius:5px;padding:2px 7px;margin-left:6px;vertical-align:middle;letter-spacing:0.08em">EXPERIMENTAL</span></h3>
+      <p style="font-size:14px;line-height:1.6">A working wallpaper plugin lets Plasma render image, video, and simplified scene wallpapers through Plasma's native wallpaper system — the first step beyond wlroots compositors.</p>
+    </div>
+    <div class="card" style="padding:24px;gap:10px">
+      <h3 style="font-size:17px">Workshop import <span style="font-size:11px;font-weight:500;color:#e46a9f;border:1px solid rgba(228,106,159,0.4);border-radius:5px;padding:2px 7px;margin-left:6px;vertical-align:middle;letter-spacing:0.08em">OPT-IN</span></h3>
+      <p style="font-size:14px;line-height:1.6">Behind <span class="mono" style="font-size:12.5px;color:#f0a06a">BACKLAYER_ENABLE_WORKSHOP=1</span>, local Wallpaper Engine items can be imported and classified as video, scene, or web. Compatibility is partial — native assets are the primary direction.</p>
+    </div>
+  </div>
+</section>
+
+<footer style="border-top:1px solid #1a1f38;margin-top:clamp(24px,5vw,56px)">
+  <div style="max-width:1080px;margin:0 auto;padding:28px 24px;display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:16px">
+    <div style="display:flex;align-items:center;gap:10px">
+      <svg viewBox="0 0 144 144" aria-hidden="true" style="width:22px;height:22px;display:block"><use href="#blLogoArt"></use></svg>
+      <span style="font-size:13.5px;color:#6b7190">Backlayer — an open-source project by <a href="https://github.com/MadsenDev">MadsenDev</a></span>
+    </div>
+    <div style="display:flex;gap:18px;font-size:13.5px">
+      <a href="https://github.com/MadsenDev/backlayer" class="footer-link">Repository</a>
+      <a href="https://github.com/MadsenDev/backlayer/blob/main/docs/configuration.md" class="footer-link">Docs</a>
+      <a href="https://github.com/MadsenDev/backlayer/blob/main/CHANGELOG.md" class="footer-link">Changelog</a>
+    </div>
+  </div>
+</footer>
+</div>
+
+<script>
+(function () {
+  var reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // Hero canvas wave layers
+  var cv = document.getElementById('heroCanvas');
+  var ctx = cv.getContext('2d');
+  var layers = [
+    { c: 'rgba(246,160,94,0.16)', amp: 22, freq: 1.7, speed: 0.4, base: 0.66 },
+    { c: 'rgba(228,106,159,0.18)', amp: 30, freq: 1.15, speed: -0.28, base: 0.74 },
+    { c: 'rgba(138,95,208,0.22)', amp: 36, freq: 0.85, speed: 0.2, base: 0.82 },
+    { c: 'rgba(74,88,196,0.3)', amp: 42, freq: 0.6, speed: -0.13, base: 0.9 },
+  ];
+  function draw(t) {
+    var dpr = Math.min(window.devicePixelRatio || 1, 2);
+    var w = cv.offsetWidth * dpr, h = cv.offsetHeight * dpr;
+    if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
+    ctx.clearRect(0, 0, w, h);
+    for (var i = 0; i < layers.length; i++) {
+      var L = layers[i];
+      ctx.beginPath();
+      ctx.moveTo(0, h);
+      for (var x = 0; x <= w; x += 8 * dpr) {
+        ctx.lineTo(x, h * L.base + Math.sin((x / w) * Math.PI * 2 * L.freq + t * L.speed + L.base * 9) * L.amp * dpr);
+      }
+      ctx.lineTo(w, h);
+      ctx.closePath();
+      ctx.fillStyle = L.c;
+      ctx.fill();
+    }
+  }
+  if (reduced) {
+    draw(0);
+  } else {
+    var loop = function (ms) { draw(ms / 1000); requestAnimationFrame(loop); };
+    requestAnimationFrame(loop);
+  }
+
+  // Scene Composer mock: ember particles
+  var emberHost = document.getElementById('fxEmbers');
+  for (var i = 0; i < 14; i++) {
+    var left = ((i * 61) % 92) + 4;
+    var size = 3 + ((i * 7) % 5);
+    var dur = 4 + ((i * 13) % 45) / 10;
+    var delay = -(((i * 17) % 60) / 10);
+    var anim = i % 2 ? 'bl-ember2' : 'bl-ember';
+    var d = document.createElement('div');
+    d.className = 'bl-ember';
+    d.setAttribute('aria-hidden', 'true');
+    d.style.cssText = 'position:absolute;left:' + left + '%;bottom:12%;width:' + size + 'px;height:' + size +
+      'px;border-radius:50%;background:#ffd9a8;box-shadow:0 0 12px rgba(255,170,90,0.85);opacity:0;animation:' +
+      anim + ' ' + dur + 's linear ' + delay + 's infinite;pointer-events:none';
+    emberHost.appendChild(d);
+  }
+
+  // FX toggle chips
+  var chips = document.querySelectorAll('.fx-chip');
+  for (var c = 0; c < chips.length; c++) {
+    chips[c].addEventListener('click', function () {
+      var target = document.getElementById(this.getAttribute('data-fx'));
+      var on = this.classList.toggle('on');
+      this.classList.toggle('off', !on);
+      target.style.display = on ? '' : 'none';
+    });
+  }
+
+  // Copy buttons
+  var copies = document.querySelectorAll('.copy-btn');
+  for (var b = 0; b < copies.length; b++) {
+    copies[b].addEventListener('click', function () {
+      var btn = this;
+      if (navigator.clipboard) navigator.clipboard.writeText(btn.getAttribute('data-cmd')).catch(function () {});
+      btn.textContent = 'Copied';
+      clearTimeout(btn._t);
+      btn._t = setTimeout(function () { btn.textContent = 'Copy'; }, 1600);
+    });
+  }
+
+  // Reveal-on-scroll
+  if (!reduced && 'IntersectionObserver' in window) {
+    var els = document.querySelectorAll('[data-reveal]');
+    els.forEach(function (el) {
+      el.style.opacity = '0';
+      el.style.transform = 'translateY(24px)';
+      el.style.transition = 'opacity 0.7s ease, transform 0.7s ease';
+    });
+    var io = new IntersectionObserver(function (entries) {
+      entries.forEach(function (e) {
+        if (e.isIntersecting) {
+          e.target.style.opacity = '1';
+          e.target.style.transform = 'none';
+          io.unobserve(e.target);
+        }
+      });
+    }, { threshold: 0.1 });
+    els.forEach(function (el) { io.observe(el); });
+  }
+})();
+</script>
+</body>
+</html>
