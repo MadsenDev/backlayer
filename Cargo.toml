@@ -1,6 +1,7 @@
 [workspace]
 members = [
   "apps/backlayerd",
+  "apps/backlayerctl",
   "apps/animation-probe",
   "apps/scene-runner",
   "apps/shader-runner",

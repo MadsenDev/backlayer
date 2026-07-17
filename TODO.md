@@ -30,8 +30,20 @@ wallpaper that they authored in the Scene Composer.
       river, ...) with Wayland-native monitor discovery so the daemon runs
       outside Hyprland/KDE — needed since the primary dev machine no longer
       runs Hyprland
+- [x] Fail fast with a clear "Wayland session required" error on unknown
+      environments (X11, TTY) instead of silently defaulting to the Hyprland
+      client
 - [ ] Manually verify the generic fallback end-to-end on Niri (discovery,
       assignment, layer-shell rendering, input passthrough)
+
+### Diagnostics and CLI
+
+- [x] Reject unrecognized `backlayerd` arguments with usage output instead of
+      silently falling back to one-shot probe mode; add `--help`/`--version`
+- [x] Add `backlayerctl doctor` (with `--json`) reporting session/compositor
+      detection, config load status, daemon socket health, monitors, runtime
+      sessions, recent renderer events, video dependencies, and discovered
+      assets
 
 ### Scene parity: Composer preview ↔ `scene-runner` 1:1
 

@@ -50,6 +50,7 @@ Workshop compatibility exists behind `BACKLAYER_ENABLE_WORKSHOP=1`, but native s
 ## Repo Layout
 
 - `apps/backlayerd`: daemon entrypoint
+- `apps/backlayerctl`: diagnostic CLI (`backlayerctl doctor`)
 - `apps/ui`: React manager UI
 - `apps/ui/src-tauri`: Tauri desktop shell
 - `apps/scene-runner`: native scene runtime worker
@@ -88,6 +89,12 @@ Run the manager:
 
 ```bash
 pnpm ui:tauri:dev
+```
+
+Check the local installation and daemon health:
+
+```bash
+cargo run -p backlayerctl -- doctor
 ```
 
 Browser-only UI development is also available:

@@ -10,52 +10,97 @@ use backlayer_kde::{KdeClient, WaylandOutputClient};
 use backlayer_renderer_image::ImageRenderer;
 use backlayer_renderer_shader::ShaderRenderer;
 use backlayer_renderer_video::VideoRenderer;
-use backlayer_types::{CompositorClient, DaemonResponse, DaemonState, RuntimeDependencies};
+use backlayer_types::{
+    CompositorClient, CompositorKind, DaemonResponse, DaemonState, RuntimeDependencies,
+};
 use backlayer_wayland::LayerShellRuntime;
 use runtime::RuntimeCoordinator;
 use tracing::info;
 
-fn detect_compositor() -> Arc<dyn CompositorClient> {
-    let desktop = std::env::var("XDG_CURRENT_DESKTOP")
-        .unwrap_or_default()
-        .to_lowercase();
-    let is_hyprland =
-        desktop.contains("hyprland") || std::env::var("HYPRLAND_INSTANCE_SIGNATURE").is_ok();
-    let is_kde = desktop.contains("kde") || desktop.contains("plasma");
-    let has_wayland = std::env::var("WAYLAND_DISPLAY").is_ok();
+fn detect_compositor() -> Result<Arc<dyn CompositorClient>, String> {
+    let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
 
-    if is_hyprland {
-        info!("detected compositor: hyprland");
-        Arc::new(HyprlandClient::new())
-    } else if is_kde {
-        info!("detected compositor: kde");
-        Arc::new(KdeClient::new())
-    } else if has_wayland {
-        // Any other Wayland session (Niri, Sway, river, ...) gets
-        // Wayland-native monitor discovery; rendering works wherever the
-        // compositor implements wlr-layer-shell.
-        info!(desktop = %desktop, "detected compositor: generic wayland layer-shell fallback");
-        Arc::new(WaylandOutputClient::generic())
-    } else {
-        info!(desktop = %desktop, "compositor unknown, defaulting to hyprland client");
-        Arc::new(HyprlandClient::new())
+    match CompositorKind::detect_from_env() {
+        CompositorKind::Hyprland => {
+            info!("detected compositor: hyprland");
+            Ok(Arc::new(HyprlandClient::new()))
+        }
+        CompositorKind::Kde => {
+            info!("detected compositor: kde");
+            Ok(Arc::new(KdeClient::new()))
+        }
+        CompositorKind::GenericWayland => {
+            // Any other Wayland session (Niri, Sway, river, ...) gets
+            // Wayland-native monitor discovery; rendering works wherever the
+            // compositor implements wlr-layer-shell.
+            info!(desktop = %desktop, "detected compositor: generic wayland layer-shell fallback");
+            Ok(Arc::new(WaylandOutputClient::generic()))
+        }
+        CompositorKind::Unsupported => Err(format!(
+            "unsupported session: Backlayer requires a Wayland session, but WAYLAND_DISPLAY is \
+             not set (XDG_CURRENT_DESKTOP={desktop:?}). X11 and non-graphical sessions are not \
+             supported; start Backlayer from inside a Wayland compositor such as Hyprland."
+        )),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunMode {
+    Once,
+    Serve,
+}
+
+const USAGE: &str = "\
+Usage: backlayerd [MODE]
+
+Modes:
+  --once       run a one-shot probe and exit (default)
+  --serve      run as a persistent daemon with the IPC server
+
+Options:
+  -h, --help       print this help and exit
+  -V, --version    print the version and exit";
+
+fn parse_run_mode() -> Result<RunMode, String> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.as_slice() {
+        [] => Ok(RunMode::Once),
+        [arg] => match arg.as_str() {
+            "--once" => Ok(RunMode::Once),
+            "--serve" => Ok(RunMode::Serve),
+            "-h" | "--help" => {
+                println!("{USAGE}");
+                std::process::exit(0);
+            }
+            "-V" | "--version" => {
+                println!("backlayerd {}", env!("CARGO_PKG_VERSION"));
+                std::process::exit(0);
+            }
+            other => Err(format!("unrecognized argument: {other}")),
+        },
+        _ => Err(format!("too many arguments: {}", args.join(" "))),
     }
 }
 
 fn main() -> Result<()> {
+    let run_mode = parse_run_mode().unwrap_or_else(|error| {
+        eprintln!("backlayerd: {error}\n\n{USAGE}");
+        std::process::exit(2);
+    });
+
     tracing_subscriber::fmt()
         .with_env_filter("backlayer=info")
         .compact()
         .init();
 
-    let compositor = detect_compositor();
+    let compositor = detect_compositor().unwrap_or_else(|error| {
+        eprintln!("backlayerd: {error}");
+        std::process::exit(1);
+    });
     let config_store = ConfigStore::default();
     let config_path = config_store.default_config_path();
     let resolved_config_path = config_store.resolve_path(&config_path)?;
     let wayland = LayerShellRuntime::new();
-    let run_mode = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "--once".to_string());
 
     let image = ImageRenderer::default();
     let shader = ShaderRenderer::default();
@@ -92,7 +137,7 @@ fn main() -> Result<()> {
     info!(runtime_dependencies = ?runtime_dependencies, "runtime dependency status");
     info!(assets = ?assets, "discovered wallpaper assets");
 
-    if run_mode == "--serve" {
+    if run_mode == RunMode::Serve {
         // In serve mode, build the plan without creating any Wayland sessions.
         // The runtime manager's apply() call inside serve_forever will immediately
         // spawn the actual runner subprocesses. Creating probe sessions here would
