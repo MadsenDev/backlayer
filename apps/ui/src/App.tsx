@@ -4871,11 +4871,12 @@ function resolveComposerSpriteLayoutFromBounds(
   const canvasAspect = canvasWidth / Math.max(canvasHeight, 1)
   const sourceAspect = image.naturalWidth / Math.max(image.naturalHeight, 1)
   // Offsets and drift/orbit amplitudes are document-space pixels; pulse
-  // `amount` is a unitless scale delta and stays unscaled.
+  // `amount` is a unitless scale delta and stays unscaled. Base scale is
+  // floored at 0.1 (spec §2) and base opacity clamped to [0, 1].
   let offsetX = node.x * unitScale
   let offsetY = node.y * unitScale
-  let opacity = node.opacity
-  let scale = node.scale
+  let opacity = clamp01(node.opacity)
+  let scale = Math.max(node.scale, 0.1)
 
   for (const behavior of node.behaviors) {
     const phase = timeSeconds * behavior.speed + behavior.phase
@@ -5061,6 +5062,7 @@ function drawComposerEffectNode(
   const width = context.canvas.width
   const height = context.canvas.height
   const { red, green, blue } = parseColorHex(resolveEffectColorHex(node))
+  const opacity = clamp01(node.opacity)
   context.save()
   if (node.effect === 'glow') {
     const pulse = node.intensity * (0.78 + ((Math.sin(timeSeconds * Math.max(node.speed, 0.01)) + 1) * 0.11))
@@ -5075,7 +5077,7 @@ function drawComposerEffectNode(
       Math.max(width, height) / 1.65,
     )
     for (const stop of [0, 0.2, 0.4, 0.6, 0.8, 1]) {
-      const alpha = clamp01(((1 - stop) ** 2) * node.opacity * pulse)
+      const alpha = clamp01(((1 - stop) ** 2) * opacity * pulse)
       gradient.addColorStop(stop, `rgba(${red}, ${green}, ${blue}, ${alpha})`)
     }
     context.fillStyle = gradient
@@ -5093,48 +5095,80 @@ function drawComposerEffectNode(
       outerRadius,
     )
     for (const stop of [0, 0.25, 0.5, 0.75, 1]) {
-      const alpha = clamp01((stop ** 1.8) * node.opacity * node.intensity)
+      const alpha = clamp01((stop ** 1.8) * opacity * node.intensity)
       gradient.addColorStop(stop, `rgba(${red}, ${green}, ${blue}, ${alpha})`)
     }
     context.fillStyle = gradient
     context.fillRect(0, 0, width, height)
   } else if (node.effect === 'scanlines') {
+    // The band alpha depends only on the pixel row, so exact per-pixel
+    // rasterization is one-pixel-tall rows sampled at row centers.
     const offset = (timeSeconds * Math.max(node.speed, 0.01) * 0.35) % 1
-    const alphaScale = node.opacity * node.intensity * 0.18
-    const lineStep = height / 96
+    const alphaScale = opacity * node.intensity * 0.18
     context.fillStyle = `rgb(${red}, ${green}, ${blue})`
     for (let y = 0; y < height; y += 1) {
-      const linePhase = ((((y / Math.max(height, 1)) + offset) * 96) % 1 + 1) % 1
+      const linePhase = (((((y + 0.5) / Math.max(height, 1)) + offset) * 96) % 1 + 1) % 1
       const distanceToCenter = Math.abs(linePhase - 0.5)
       const band = 1 - smoothstep(0.28, 0.5, distanceToCenter)
-      const alpha = band * alphaScale
+      const alpha = clamp01(band * alphaScale)
       if (alpha <= 0.001) {
         continue
       }
       context.globalAlpha = alpha
-      context.fillRect(0, y, width, Math.max(1, lineStep * 0.2))
+      context.fillRect(0, y, width, 1)
     }
     context.globalAlpha = 1
   } else if (node.effect === 'fog') {
-    const cell = Math.max(2, Math.floor(Math.min(width, height) / 180))
-    context.fillStyle = `rgb(${red}, ${green}, ${blue})`
-    for (let y = 0; y < height; y += cell) {
-      for (let x = 0; x < width; x += cell) {
-        const uvx = x / Math.max(width, 1)
-        const uvy = y / Math.max(height, 1)
-        const fogWave = Math.sin((uvx * 5) + (timeSeconds * Math.max(node.speed, 0.01))) * 0.03
-        const band = smoothstep(0.12 + fogWave, 0.72 + fogWave, uvy) * (1 - smoothstep(0.56 + fogWave, 1, uvy))
-        const alpha = band * node.opacity * node.intensity * 0.22
-        if (alpha <= 0.001) {
-          continue
-        }
-        context.globalAlpha = alpha
-        context.fillRect(x, y, cell, cell)
+    const strip = resolveFogProfileStrip(height, red, green, blue)
+    if (strip) {
+      context.globalAlpha = clamp01(opacity * node.intensity * 0.22)
+      const stripWidth = 2
+      const speed = Math.max(node.speed, 0.01)
+      for (let x = 0; x < width; x += stripWidth) {
+        const uvx = (x + stripWidth * 0.5) / Math.max(width, 1)
+        const fogWave = Math.sin((uvx * 5) + (timeSeconds * speed)) * 0.03
+        context.drawImage(strip, 0, 0, 1, height, x, fogWave * height, Math.min(stripWidth, width - x), height)
       }
+      context.globalAlpha = 1
     }
-    context.globalAlpha = 1
   }
   context.restore()
+}
+
+// Fog's vertical band profile is static — the animated x-wave only shifts it
+// vertically (spec §6) — so the per-pixel profile is cached as a 1-px-wide
+// strip in the effect color and drawn as wave-shifted column strips.
+const fogProfileStripCache = new Map<string, HTMLCanvasElement>()
+
+function resolveFogProfileStrip(height: number, red: number, green: number, blue: number) {
+  const key = `${height}:${red}:${green}:${blue}`
+  const cached = fogProfileStripCache.get(key)
+  if (cached) {
+    return cached
+  }
+  const strip = document.createElement('canvas')
+  strip.width = 1
+  strip.height = Math.max(height, 1)
+  const stripContext = strip.getContext('2d')
+  if (!stripContext) {
+    return null
+  }
+  const pixels = stripContext.createImageData(1, strip.height)
+  for (let y = 0; y < strip.height; y += 1) {
+    const uvy = (y + 0.5) / strip.height
+    const band = smoothstep(0.12, 0.72, uvy) * (1 - smoothstep(0.56, 1, uvy))
+    const offset = y * 4
+    pixels.data[offset] = red
+    pixels.data[offset + 1] = green
+    pixels.data[offset + 2] = blue
+    pixels.data[offset + 3] = Math.round(clamp01(band) * 255)
+  }
+  stripContext.putImageData(pixels, 0, 0)
+  if (fogProfileStripCache.size >= 12) {
+    fogProfileStripCache.clear()
+  }
+  fogProfileStripCache.set(key, strip)
+  return strip
 }
 
 // smoothstep(1, 0, r) sampled at fixed offsets, same falloff the runtime

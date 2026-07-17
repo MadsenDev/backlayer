@@ -3900,6 +3900,7 @@ dependencies = [
  "bytemuck",
  "image",
  "image_dds",
+ "naga",
  "pollster",
  "serde_json",
  "tracing",

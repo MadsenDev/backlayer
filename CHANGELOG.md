@@ -30,6 +30,9 @@ The format is intentionally simple for now and follows an `Unreleased` section p
 
 ### Changed
 
+- Scene Composer preview effects now match `scene-runner` per-pixel: scanlines render as exact one-pixel rows (overlapping rows previously over-darkened the pattern at larger preview sizes) and fog renders from a cached per-pixel vertical profile shifted per column by the wave, replacing the blocky quantized-cell rasterization
+- `scene-runner`'s fog shader now shifts its fade-out edge with the horizontal wave so fog is a pure vertical shift of a static band profile on both renderers, as the scene-semantics spec now defines (spec §6, Effects)
+- Scene Composer preview sprites now floor `scale` at 0.1 and clamp base opacity to [0, 1], matching the runtime
 - Scene pixel-unit fields (sprite offsets, drift/orbit amplitudes, emitter size/speed/gravity) are now interpreted in document space and scaled by the canvas/document long-edge ratio in both the composer preview and `scene-runner`, so scenes keep the authored composition at any monitor resolution instead of rendering particles and offsets relatively smaller on higher-resolution outputs
 - `scene-runner` now advances its particle simulation with the real wall-clock frame delta (clamped to 100 ms) like the composer preview, instead of a fixed nominal step per rendered frame that slowed particles down under dropped frames
 - `scene-runner` now clamps emitter region/line parameters and minimum speed exactly like the composer preview, and an unset line angle now follows the emitter's custom direction instead of the preset default

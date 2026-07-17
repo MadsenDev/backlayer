@@ -141,8 +141,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let band = 1.0 - smoothstep(0.28, 0.5, distance_to_center);
     return vec4<f32>(effect.color_r, effect.color_g, effect.color_b, band * effect.opacity * effect.intensity * 0.18);
   }
+  // The wave is a pure vertical shift of a static band profile (spec §6),
+  // so every smoothstep edge moves by fog_wave together.
   let fog_wave = sin((uv.x * 5.0) + (effect.time_seconds * max(effect.speed, 0.01))) * 0.03;
-  let band = smoothstep(0.12 + fog_wave, 0.72 + fog_wave, uv.y) * (1.0 - smoothstep(0.56 + fog_wave, 1.0, uv.y));
+  let band = smoothstep(0.12 + fog_wave, 0.72 + fog_wave, uv.y) * (1.0 - smoothstep(0.56 + fog_wave, 1.0 + fog_wave, uv.y));
   return vec4<f32>(effect.color_r, effect.color_g, effect.color_b, band * effect.opacity * effect.intensity * 0.22);
 }
 "#;
@@ -3204,8 +3206,26 @@ mod tests {
     use super::{
         compose_scene_target, extract_scene_image_target, find_first_sibling_image,
         load_native_scene_runtime, parse_tex_metadata, resolve_runtime_target, scene_sprite_layout,
-        scene_unit_scale, spawn_particle_with_age,
+        scene_unit_scale, spawn_particle_with_age, EFFECT_SHADER, PARTICLE_SHADER, SPRITE_SHADER,
     };
+
+    #[test]
+    fn wgsl_shaders_parse_and_validate() {
+        for (name, source) in [
+            ("sprite", SPRITE_SHADER),
+            ("effect", EFFECT_SHADER),
+            ("particle", PARTICLE_SHADER),
+        ] {
+            let module = naga::front::wgsl::parse_str(source)
+                .unwrap_or_else(|error| panic!("{name} shader should parse: {error}"));
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::all(),
+            )
+            .validate(&module)
+            .unwrap_or_else(|error| panic!("{name} shader should validate: {error:?}"));
+        }
+    }
 
     #[test]
     fn resolves_first_scene_json_image_reference() {

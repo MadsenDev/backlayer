@@ -89,10 +89,34 @@ settles the outstanding decisions; these fixes implement it.
   emitter's resolved direction; the runtime now follows the resolved
   direction too.
 
+## Fix log — round 4 (2026-07-17)
+
+The spec now defines the four effect formulas normatively (spec §6,
+Effects); these fixes close the remaining effect divergences.
+
+- **3.4** the preview now rasterizes scanlines as exact one-pixel-tall rows
+  sampled at row centers — the previous `0.2 × line-height` rows stepped
+  1 px apart overlapped and over-darkened the pattern at preview heights
+  above 480 px — and renders fog from a cached per-pixel vertical profile
+  strip drawn as 2-px wave-shifted column strips instead of quantized
+  cells, removing the blockiness (and tens of thousands of per-frame
+  `fillRect` calls).
+- **Fog wave semantics (spec decision)**: the runtime fog shader's fade-out
+  edge now shifts with the horizontal wave (`smoothstep(0.56 + w, 1.0 + w,
+  uv.y)`), making the wave a pure vertical shift of a static band profile
+  on both sides — which is what lets the preview precompute the profile.
+- **2.4 (partial)** the preview now floors sprite `scale` at 0.1 and clamps
+  base opacity to [0, 1] like the runtime; the runtime's whole-pixel layout
+  rounding remains the accepted sub-pixel divergence (spec §2).
+- `scene-runner`'s three WGSL shaders are now parsed and validated by naga
+  in a unit test, so shader edits fail under `cargo test` instead of at
+  wallpaper startup.
+
 Still open from this audit: 1.3 (blending space — accepted divergence per
-spec §5, pending the shared-GPU-preview track), 4.5 (particle sprites,
-tracked as its own Milestone 1 item), and the low-severity items in 2.4
-and 3.4.
+spec §5, pending the shared-GPU-preview track) and 4.5 (particle sprites,
+tracked as its own Milestone 1 item). The preview's piecewise-linear
+gradient stops for glow/vignette falloffs and its 2-px fog wave
+quantization are accepted approximations per spec §6.
 
 ## How the two renderers relate
 
