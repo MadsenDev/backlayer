@@ -71,7 +71,7 @@ Animated shader assets must declare a `ProbeUniforms` block (`time_seconds`, `wi
 
 ### Scene Composer ↔ scene-runner parity
 
-The Scene Composer preview (in `App.tsx`) and `scene-runner` implement the same scene semantics twice — preview parity is a headline focus for the v0.3.0 release, not polish. `docs/scene-parity-audit.md` catalogs known divergences. When changing particle/effect/sprite behavior on either side, apply the matching change on the other (or record the divergence in the audit).
+The Scene Composer preview (in `App.tsx`) and `scene-runner` implement the same scene semantics twice — preview parity is a headline focus for the v0.3.0 release, not polish. `docs/scene-semantics-spec.md` is the normative definition of scene evaluation (units, time base, curves, blending); `docs/scene-parity-audit.md` catalogs known divergences. When changing particle/effect/sprite behavior on either side, update the spec and apply the matching change on the other (or record the divergence in the audit).
 
 ### KDE Plasma plugin (`integrations/kde-plasma`)
 
@@ -100,4 +100,4 @@ A Plasma 6 wallpaper plugin (QML) that reads `~/.config/backlayer/config.toml` o
 - Do not expand scope to other desktop environments during MVP work (the KDE Plasma plugin bridge is the one approved exception).
 - `CHANGELOG.md` must be updated (under `Unreleased`) for every user-visible change.
 - Version bumps require a `CHANGELOG.md` update in the same changeset.
-- Keep docs aligned with implementation reality. Reference docs live in `docs/` (architecture, configuration, install, limitations, manual-testing, systemd, animation-probe, scene-parity-audit).
+- Keep docs aligned with implementation reality. Reference docs live in `docs/` (architecture, configuration, install, limitations, manual-testing, systemd, animation-probe, scene-parity-audit, scene-semantics-spec).

@@ -64,9 +64,9 @@ truth for scene evaluation.
       particle compositing never applied, particles drawn in node order
       instead of on top, hardcoded glow gradient outer color, glow/vignette
       falloff curves, and behavior constants that drifted from the runtime's
-- [ ] Write a single scene-semantics spec both renderers implement:
+- [x] Write a single scene-semantics spec both renderers implement:
       coordinate space, units, time base, curve interpolation, and blend
-      modes per node type
+      modes per node type — see `docs/scene-semantics-spec.md`
 - [x] Match particle simulation behavior between preview and runtime: spawn
       rates, lifetime/speed ranges, direction/gravity, burst timing, emitter
       shapes, and over-life size/alpha/color curves — the preview now runs
@@ -74,8 +74,11 @@ truth for scene evaluation.
       the composer's default curves and curve sanitation
 - [ ] Match effect rendering between preview and runtime: glow, fog, tint,
       and additive vs alpha blending
-- [ ] Match coordinate space, scaling, and aspect handling between the
-      preview viewport and the output surface
+- [x] Match coordinate space, scaling, and aspect handling between the
+      preview viewport and the output surface — pixel-unit fields are now
+      document-space and both renderers scale them by the canvas/document
+      long-edge ratio; the runtime also adopted the preview's wall-clock
+      particle time base and parameter clamps
 - [x] Match particle occluder/landing-surface behavior between preview and
       runtime, including custom drawn regions and polygon particle areas —
       landing is now permanent with the runtime's crossing detection and

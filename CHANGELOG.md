@@ -8,6 +8,8 @@ The format is intentionally simple for now and follows an `Unreleased` section p
 
 ### Added
 
+- Scene-semantics spec (`docs/scene-semantics-spec.md`): the single normative definition of coordinate space, pixel-unit scaling, time base, curve interpolation/sanitation, blend modes, color handling, draw order, and occluder behavior that both the Scene Composer preview and `scene-runner` implement
+
 - `backlayerctl doctor` diagnostic command (with `--json` output) that checks the session/compositor environment, config load status, daemon socket health, monitors, runtime sessions, recent renderer events, video dependencies, and discovered assets
 - `backlayerd --help` and `--version` flags with proper usage output
 
@@ -28,6 +30,9 @@ The format is intentionally simple for now and follows an `Unreleased` section p
 
 ### Changed
 
+- Scene pixel-unit fields (sprite offsets, drift/orbit amplitudes, emitter size/speed/gravity) are now interpreted in document space and scaled by the canvas/document long-edge ratio in both the composer preview and `scene-runner`, so scenes keep the authored composition at any monitor resolution instead of rendering particles and offsets relatively smaller on higher-resolution outputs
+- `scene-runner` now advances its particle simulation with the real wall-clock frame delta (clamped to 100 ms) like the composer preview, instead of a fixed nominal step per rendered frame that slowed particles down under dropped frames
+- `scene-runner` now clamps emitter region/line parameters and minimum speed exactly like the composer preview, and an unset line angle now follows the emitter's custom direction instead of the preset default
 - `backlayerd` now fails fast with a clear "Wayland session required" error on unknown environments (X11, TTY, KDE on X11) instead of silently defaulting to the Hyprland client
 - `backlayerd` now rejects unrecognized command-line arguments with usage output instead of silently running the one-shot probe mode
 - Scene Composer preview particles now run the same stateful simulation as `scene-runner` — burst emission, warm start, per-frame gravity/drag integration, and permanent surface landing now behave in the editor exactly as they do on the wallpaper
