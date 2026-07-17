@@ -21,6 +21,7 @@ The format is intentionally simple for now and follows an `Unreleased` section p
 - Built-in `demo.prism-loop` native video asset for end-to-end video playback testing
 - Unified Create flow in the manager for native image, scene, shader, and video wallpapers
 - Release-facing docs for install flow, architecture, known limitations, and manual verification
+- Side-by-side Scene Composer preview vs wallpaper parity checklist in the manual verification matrix
 - Native `.backlayer` single-file package support for Backlayer-created wallpapers
 - Sprite-based particle occluders and landing surfaces for native scenes
 - Viewport-drawn custom particle collider regions for sprite nodes in the Scene Composer

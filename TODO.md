@@ -92,8 +92,8 @@ truth for scene evaluation.
       scene engine) so parity holds by construction instead of by discipline
 - [ ] Add particle sprite/image support for native scene emitters — landed
       in the composer and `scene-runner` in the same changeset
-- [ ] Add a side-by-side preview-vs-runtime checklist to the manual
-      verification matrix
+- [x] Add a side-by-side preview-vs-runtime checklist to the manual
+      verification matrix — see "Scene Parity" in `docs/manual-testing.md`
 
 ### Video performance
 
