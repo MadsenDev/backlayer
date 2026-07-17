@@ -601,6 +601,54 @@ pub trait CompositorClient: Send + Sync + std::fmt::Debug {
     fn fullscreen_active(&self) -> Result<bool, Box<dyn std::error::Error + Send + Sync>>;
 }
 
+/// Which compositor integration the daemon would select for the current
+/// session. Shared between `backlayerd` (client construction) and
+/// `backlayerctl doctor` (diagnostics) so both report the same decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompositorKind {
+    Hyprland,
+    Kde,
+    GenericWayland,
+    Unsupported,
+}
+
+impl CompositorKind {
+    pub fn from_session(
+        desktop: &str,
+        has_hyprland_signature: bool,
+        has_wayland_display: bool,
+    ) -> Self {
+        let desktop = desktop.to_lowercase();
+        if desktop.contains("hyprland") || has_hyprland_signature {
+            Self::Hyprland
+        } else if has_wayland_display && (desktop.contains("kde") || desktop.contains("plasma")) {
+            Self::Kde
+        } else if has_wayland_display {
+            Self::GenericWayland
+        } else {
+            Self::Unsupported
+        }
+    }
+
+    pub fn detect_from_env() -> Self {
+        Self::from_session(
+            &std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default(),
+            std::env::var("HYPRLAND_INSTANCE_SIGNATURE").is_ok(),
+            std::env::var("WAYLAND_DISPLAY").is_ok(),
+        )
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Hyprland => "hyprland",
+            Self::Kde => "kde",
+            Self::GenericWayland => "generic wayland layer-shell",
+            Self::Unsupported => "unsupported",
+        }
+    }
+}
+
 fn default_false() -> bool {
     false
 }
@@ -634,9 +682,38 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        AssetMetadata, AssetSourceKind, AssignmentSettings, CompatibilityInfo, ImportMetadata,
-        ImportSourceApp, MonitorAssignment, MonitorInfo, WallpaperKind,
+        AssetMetadata, AssetSourceKind, AssignmentSettings, CompatibilityInfo, CompositorKind,
+        ImportMetadata, ImportSourceApp, MonitorAssignment, MonitorInfo, WallpaperKind,
     };
+
+    #[test]
+    fn compositor_kind_selects_expected_integration() {
+        assert_eq!(
+            CompositorKind::from_session("Hyprland", false, true),
+            CompositorKind::Hyprland
+        );
+        assert_eq!(
+            CompositorKind::from_session("", true, true),
+            CompositorKind::Hyprland
+        );
+        assert_eq!(
+            CompositorKind::from_session("KDE", false, true),
+            CompositorKind::Kde
+        );
+        assert_eq!(
+            CompositorKind::from_session("niri", false, true),
+            CompositorKind::GenericWayland
+        );
+        // KDE on X11 has no Wayland display and is not supported.
+        assert_eq!(
+            CompositorKind::from_session("KDE", false, false),
+            CompositorKind::Unsupported
+        );
+        assert_eq!(
+            CompositorKind::from_session("", false, false),
+            CompositorKind::Unsupported
+        );
+    }
 
     #[test]
     fn monitor_assignment_matches_stable_id_and_legacy_output_name() {

@@ -300,6 +300,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "backlayerctl"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "backlayer-config",
+ "backlayer-renderer-video",
+ "backlayer-types",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "backlayerd"
 version = "0.2.0"
 dependencies = [

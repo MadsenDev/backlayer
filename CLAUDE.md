@@ -11,6 +11,7 @@ cargo build -p backlayerd                           # build daemon
 cargo test -p backlayer-config -p backlayer-types -p scene-runner  # run tests
 cargo run -p backlayerd -- --serve                  # run daemon (persistent mode)
 cargo run -p backlayerd                             # run daemon (one-shot probe)
+cargo run -p backlayerctl -- doctor                 # diagnose session/daemon health (--json for machine output)
 cargo run -p animation-probe                        # isolated shader crash debug tool
 
 # Workshop mode

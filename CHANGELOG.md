@@ -8,6 +8,9 @@ The format is intentionally simple for now and follows an `Unreleased` section p
 
 ### Added
 
+- `backlayerctl doctor` diagnostic command (with `--json` output) that checks the session/compositor environment, config load status, daemon socket health, monitors, runtime sessions, recent renderer events, video dependencies, and discovered assets
+- `backlayerd --help` and `--version` flags with proper usage output
+
 - Project landing page for GitHub Pages under `site/` (self-contained static HTML) with a `Deploy GitHub Pages` workflow that publishes it from `main`
 - Generic Wayland layer-shell compositor fallback: on any non-Hyprland, non-KDE Wayland session (Niri, Sway, river, ...) the daemon now uses Wayland-native monitor discovery (`wl:` monitor-id prefix) with the standard layer-shell rendering path; fullscreen detection is not available on this path yet
 - Scene parity audit (`docs/scene-parity-audit.md`) documenting every known visual divergence between the Scene Composer preview and `scene-runner`, including newly found runtime bugs (sprite rotation ignored, rain occlusion axis, sRGB color handling) and preview bugs (missing blend modes, particle draw order)
@@ -25,6 +28,8 @@ The format is intentionally simple for now and follows an `Unreleased` section p
 
 ### Changed
 
+- `backlayerd` now fails fast with a clear "Wayland session required" error on unknown environments (X11, TTY, KDE on X11) instead of silently defaulting to the Hyprland client
+- `backlayerd` now rejects unrecognized command-line arguments with usage output instead of silently running the one-shot probe mode
 - Scene Composer preview particles now run the same stateful simulation as `scene-runner` — burst emission, warm start, per-frame gravity/drag integration, and permanent surface landing now behave in the editor exactly as they do on the wallpaper
 - `scene-runner` now applies the composer's per-preset default size/alpha/color curves and curve sanitation when a scene document omits or misorders them
 - Product docs now carry a milestone-based roadmap targeting a first public v0.3.0 release, with Scene Composer ↔ `scene-runner` visual parity elevated to a headline focus and KDE Plasma bridge work sequenced after the Hyprland MVP ships
