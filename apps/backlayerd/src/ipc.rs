@@ -598,7 +598,7 @@ mod tests {
         net::Shutdown,
         os::unix::net::UnixStream,
         sync::{
-            Arc,
+            Arc, Mutex, MutexGuard, OnceLock,
             atomic::{AtomicBool, Ordering},
         },
         thread,
@@ -617,8 +617,20 @@ mod tests {
         IpcServer, MockCompositorClient, bind_listener, serve_listener_until_stopped, serve_once,
     };
 
+    // Some tests here rewrite process-global env vars (HOME,
+    // BACKLAYER_ENABLE_WORKSHOP) while others resolve HOME-dependent paths
+    // through ConfigStore, so every test that touches either must hold this
+    // lock to stay safe under the default parallel test runner.
+    fn env_lock() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(Mutex::default)
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[test]
     fn ipc_server_returns_state_response() {
+        let _env = env_lock();
         let socket_path =
             std::env::temp_dir().join(format!("backlayer-test-{}.sock", std::process::id()));
         let config_path =
@@ -664,6 +676,7 @@ mod tests {
 
     #[test]
     fn ipc_server_updates_assignment_and_persists_config() {
+        let _env = env_lock();
         let socket_path =
             std::env::temp_dir().join(format!("backlayer-assign-{}.sock", std::process::id()));
         let config_path =
@@ -711,6 +724,7 @@ mod tests {
 
     #[test]
     fn assignment_refreshes_runtime_plan_in_memory() {
+        let _env = env_lock();
         let mut server = IpcServer::new(
             std::env::temp_dir().join("backlayer-runtime-refresh.toml"),
             sample_state_without_assignments(),
@@ -728,6 +742,7 @@ mod tests {
 
     #[test]
     fn persistent_server_smoke_serves_runtime_state() {
+        let _env = env_lock();
         let socket_path =
             std::env::temp_dir().join(format!("backlayer-smoke-{}.sock", std::process::id()));
         let config_path =
@@ -784,6 +799,7 @@ mod tests {
 
     #[test]
     fn reimport_refreshes_assigned_imported_asset_metadata() {
+        let _env = env_lock();
         let root = std::env::temp_dir().join(format!("backlayer-reimport-{}", std::process::id()));
         fs::create_dir_all(&root).expect("root should exist");
         let workshop_item = root.join("100");
@@ -842,6 +858,7 @@ mod tests {
 
     #[test]
     fn removing_imported_asset_drops_assignment_and_asset() {
+        let _env = env_lock();
         let root = std::env::temp_dir().join(format!("backlayer-remove-{}", std::process::id()));
         fs::create_dir_all(&root).expect("root should exist");
         let workshop_item = root.join("101");
