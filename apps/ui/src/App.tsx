@@ -2794,6 +2794,7 @@ function resolveViewportSelection(
   canvasX: number,
   canvasY: number,
 ) {
+  const unitScale = resolveComposerUnitScale(previewSize.width, previewSize.height, images.get('base'))
   const ordered = [...nodes].reverse()
   for (const node of ordered) {
     if (!node.enabled) {
@@ -2804,7 +2805,7 @@ function resolveViewportSelection(
       if (!image) {
         continue
       }
-      const layout = resolveComposerSpriteLayoutFromBounds(previewSize.width, previewSize.height, image, node, 0)
+      const layout = resolveComposerSpriteLayoutFromBounds(previewSize.width, previewSize.height, image, node, 0, unitScale)
       if (pointInRect(canvasX, canvasY, layout)) {
         return node
       }
@@ -2841,7 +2842,8 @@ function resolveSelectedViewportHandle(
     if (!image) {
       return null
     }
-    const layout = resolveComposerSpriteLayoutFromBounds(previewSize.width, previewSize.height, image, selectedNode, 0)
+    const unitScale = resolveComposerUnitScale(previewSize.width, previewSize.height, images.get('base'))
+    const layout = resolveComposerSpriteLayoutFromBounds(previewSize.width, previewSize.height, image, selectedNode, 0, unitScale)
     const scaleHandleX = layout.x + layout.width
     const scaleHandleY = layout.y + layout.height
     const rotateHandleX = layout.x + (layout.width / 2)
@@ -3278,6 +3280,11 @@ function ComposerEnginePreview({
     }
   }, [activeTool])
 
+  const viewportUnitScale = resolveComposerUnitScale(
+    previewSize.width,
+    previewSize.height,
+    loadedImagesRef.current.get('base'),
+  )
   const selectedSpriteLayout = (() => {
     if (!selectedNode || selectedNode.kind !== 'sprite') {
       return null
@@ -3286,7 +3293,7 @@ function ComposerEnginePreview({
     if (!image) {
       return null
     }
-    return resolveComposerSpriteLayoutFromBounds(previewSize.width, previewSize.height, image, selectedNode, 0)
+    return resolveComposerSpriteLayoutFromBounds(previewSize.width, previewSize.height, image, selectedNode, 0, viewportUnitScale)
   })()
   const selectedEmitterOverlay = selectedNode?.kind === 'emitter'
     ? resolveEmitterViewportOverlay(selectedNode, previewSize.width, previewSize.height)
@@ -3449,10 +3456,12 @@ function ComposerEnginePreview({
           }
           if (selectedNode.kind === 'sprite') {
             if (interaction.kind === 'sprite-move') {
+              // Drag deltas are canvas pixels; sprite offsets are stored in
+              // document-space pixels, so divide out the viewport unit scale.
               onChangeNode({
                 ...selectedNode,
-                x: interaction.startX + ((pointer.normalizedX - interaction.startNormX) * previewSize.width),
-                y: interaction.startY + ((pointer.normalizedY - interaction.startNormY) * previewSize.height),
+                x: interaction.startX + ((pointer.normalizedX - interaction.startNormX) * previewSize.width / viewportUnitScale),
+                y: interaction.startY + ((pointer.normalizedY - interaction.startNormY) * previewSize.height / viewportUnitScale),
               })
               return
             }
@@ -4557,7 +4566,15 @@ function ParticlePreviewPanel({
       if (!simStateRef.current || simStateRef.current.preset !== node.preset) {
         simStateRef.current = createPreviewEmitterSimState(node)
       }
-      drawComposerEmitterNode(context, new Map<string, HTMLImageElement>(), node, [], simStateRef.current, dt)
+      drawComposerEmitterNode(
+        context,
+        new Map<string, HTMLImageElement>(),
+        node,
+        [],
+        simStateRef.current,
+        dt,
+        resolveComposerUnitScale(canvas.width, canvas.height, baseImageRef.current),
+      )
       frame = window.requestAnimationFrame(render)
     }
     frame = window.requestAnimationFrame(render)
@@ -4757,12 +4774,13 @@ function drawComposerSceneFrame(
 ) {
   const width = context.canvas.width
   const height = context.canvas.height
+  const unitScale = resolveComposerUnitScale(width, height, images.get('base'))
   context.clearRect(0, 0, width, height)
   context.fillStyle = '#05070a'
   context.fillRect(0, 0, width, height)
   // scene-runner evaluates blocker rects at time 0 (no behavior animation),
   // so the preview does the same.
-  const particleBlockers = buildComposerParticleBlockers(images, nodes, width, height, 0)
+  const particleBlockers = buildComposerParticleBlockers(images, nodes, width, height, 0, unitScale)
 
   for (const node of nodes) {
     if (!node.enabled) {
@@ -4771,7 +4789,7 @@ function drawComposerSceneFrame(
     if (node.kind === 'sprite') {
       const image = images.get(node.image_key)
       if (image) {
-        drawComposerSpriteNode(context, image, node, timeSeconds)
+        drawComposerSpriteNode(context, image, node, timeSeconds, unitScale)
       }
     } else if (node.kind === 'effect') {
       drawComposerEffectNode(context, node, timeSeconds)
@@ -4789,13 +4807,13 @@ function drawComposerSceneFrame(
       state = createPreviewEmitterSimState(node)
       emitterSimStates.set(node.id, state)
     }
-    drawComposerEmitterNode(context, images, node, particleBlockers, state, dt)
+    drawComposerEmitterNode(context, images, node, particleBlockers, state, dt, unitScale)
   }
 
   if (selectedNode?.kind === 'sprite') {
     const image = images.get(selectedNode.image_key)
     if (image) {
-      const layout = resolveComposerSpriteLayout(context, image, selectedNode, timeSeconds)
+      const layout = resolveComposerSpriteLayout(context, image, selectedNode, timeSeconds, unitScale)
       const region = resolveSpriteParticleRegionRect(
         layout,
         draftParticleRegion ?? selectedNode.particle_region ?? null,
@@ -4825,33 +4843,53 @@ function drawComposerSceneFrame(
   }
 }
 
+// Pixel-unit fields (sprite offsets, drift/orbit amplitudes, emitter
+// size/speed/gravity) are authored against the scene document's own size —
+// the base image. Both the preview and scene-runner map them onto their
+// actual canvas with this long-edge ratio so scenes look the same at any
+// output size.
+function resolveComposerUnitScale(
+  canvasWidth: number,
+  canvasHeight: number,
+  baseImage: HTMLImageElement | null | undefined,
+) {
+  const documentLongEdge = Math.max(baseImage?.naturalWidth ?? 0, baseImage?.naturalHeight ?? 0)
+  if (documentLongEdge <= 0) {
+    return 1
+  }
+  return Math.max(canvasWidth, canvasHeight, 1) / documentLongEdge
+}
+
 function resolveComposerSpriteLayoutFromBounds(
   canvasWidth: number,
   canvasHeight: number,
   image: HTMLImageElement,
   node: SceneSpriteNode,
   timeSeconds: number,
+  unitScale: number,
 ) {
   const canvasAspect = canvasWidth / Math.max(canvasHeight, 1)
   const sourceAspect = image.naturalWidth / Math.max(image.naturalHeight, 1)
-  let offsetX = node.x
-  let offsetY = node.y
+  // Offsets and drift/orbit amplitudes are document-space pixels; pulse
+  // `amount` is a unitless scale delta and stays unscaled.
+  let offsetX = node.x * unitScale
+  let offsetY = node.y * unitScale
   let opacity = node.opacity
   let scale = node.scale
 
   for (const behavior of node.behaviors) {
     const phase = timeSeconds * behavior.speed + behavior.phase
     if (behavior.kind === 'drift') {
-      offsetX += Math.sin(phase) * behavior.amount_x
-      offsetY += Math.cos(phase * 0.85) * behavior.amount_y
+      offsetX += Math.sin(phase) * behavior.amount_x * unitScale
+      offsetY += Math.cos(phase * 0.85) * behavior.amount_y * unitScale
     }
     if (behavior.kind === 'pulse') {
       scale += Math.sin(phase) * behavior.amount
       opacity *= 0.9 + ((Math.sin(phase) + 1) * 0.05)
     }
     if (behavior.kind === 'orbit') {
-      offsetX += Math.cos(phase) * behavior.amount
-      offsetY += Math.sin(phase) * Math.max(behavior.amount_y, behavior.amount * 0.6)
+      offsetX += Math.cos(phase) * behavior.amount * unitScale
+      offsetY += Math.sin(phase) * Math.max(behavior.amount_y, behavior.amount * 0.6) * unitScale
     }
   }
 
@@ -4899,8 +4937,9 @@ function resolveComposerSpriteLayout(
   image: HTMLImageElement,
   node: SceneSpriteNode,
   timeSeconds: number,
+  unitScale: number,
 ) {
-  return resolveComposerSpriteLayoutFromBounds(context.canvas.width, context.canvas.height, image, node, timeSeconds)
+  return resolveComposerSpriteLayoutFromBounds(context.canvas.width, context.canvas.height, image, node, timeSeconds, unitScale)
 }
 
 function normalizeDraggedRect(startX: number, startY: number, endX: number, endY: number): SceneNormalizedRect {
@@ -4998,8 +5037,9 @@ function drawComposerSpriteNode(
   image: HTMLImageElement,
   node: SceneSpriteNode,
   timeSeconds: number,
+  unitScale: number,
 ) {
-  const layout = resolveComposerSpriteLayout(context, image, node, timeSeconds)
+  const layout = resolveComposerSpriteLayout(context, image, node, timeSeconds, unitScale)
 
   const blend = node.blend ?? 'alpha'
   context.save()
@@ -5114,8 +5154,9 @@ function drawComposerEmitterNode(
   particleBlockers: ComposerParticleBlocker[],
   state: PreviewEmitterSimState,
   dt: number,
+  unitScale: number,
 ) {
-  const particles = buildComposerEmitterParticles(node, context.canvas.width, context.canvas.height, particleBlockers, state, dt)
+  const particles = buildComposerEmitterParticles(node, context.canvas.width, context.canvas.height, particleBlockers, state, dt, unitScale)
   const particleImageKey = resolveEmitterParticleImageKey(node)
   const particleImage = particleImageKey ? images.get(particleImageKey) ?? null : null
   context.save()
@@ -5160,8 +5201,9 @@ function buildComposerEmitterParticles(
   particleBlockers: ComposerParticleBlocker[],
   state: PreviewEmitterSimState,
   dt: number,
+  unitScale: number,
 ) {
-  stepComposerEmitterSim(node, state, width, height, particleBlockers, dt)
+  stepComposerEmitterSim(node, state, width, height, particleBlockers, dt, unitScale)
   const sizeCurve = resolveScalarCurve(node.size_curve, defaultEmitterSizeCurve(node.preset))
   const alphaCurve = resolveScalarCurve(node.alpha_curve, defaultEmitterAlphaCurve(node.preset))
   const colorCurve = resolveColorCurve(node.color_curve, defaultEmitterColorCurve(node.preset))
@@ -5289,6 +5331,7 @@ function spawnPreviewParticle(
   height: number,
   random: () => number,
   ageOverride: number | null,
+  unitScale: number,
 ): PreviewSimParticle {
   const originX = resolveEmitterOriginX(node) * width
   const originY = resolveEmitterOriginY(node) * height
@@ -5298,7 +5341,7 @@ function spawnPreviewParticle(
   const angle = baseAngle + ((random() - 0.5) * spreadRadians)
   const minSpeed = resolveEmitterMinSpeed(node)
   const maxSpeed = resolveEmitterMaxSpeed(node)
-  const speed = minSpeed + (random() * (maxSpeed - minSpeed))
+  const speed = (minSpeed + (random() * (maxSpeed - minSpeed))) * unitScale
   const minLife = resolveEmitterMinLife(node)
   const maxLife = resolveEmitterMaxLife(node)
   const maxLifeValue = minLife + (random() * (maxLife - minLife))
@@ -5306,14 +5349,16 @@ function spawnPreviewParticle(
   const dragScale = Math.max(0, 1 - (node.drag * age * 0.08))
   const vx = speed * Math.cos(angle) * dragScale
   const vy = speed * Math.sin(angle) * dragScale
+  const gravityX = node.gravity_x * unitScale
+  const gravityY = node.gravity_y * unitScale
   return {
-    x: spawn.x + (vx * age) + (0.5 * node.gravity_x * age * age),
-    y: spawn.y + (vy * age) + (0.5 * node.gravity_y * age * age),
+    x: spawn.x + (vx * age) + (0.5 * gravityX * age * age),
+    y: spawn.y + (vy * age) + (0.5 * gravityY * age * age),
     vx,
     vy,
     life: age,
     maxLife: maxLifeValue,
-    size: node.size * (0.55 + random() * 0.7),
+    size: node.size * unitScale * (0.55 + random() * 0.7),
     alpha: node.opacity * (0.55 + random() * 0.45),
     landed: false,
   }
@@ -5359,6 +5404,7 @@ function stepComposerEmitterSim(
   height: number,
   blockers: ComposerParticleBlocker[],
   dt: number,
+  unitScale: number,
 ) {
   const maxParticles = Math.max(0, node.max_particles)
   const random = () => {
@@ -5369,7 +5415,7 @@ function stepComposerEmitterSim(
   if (node.burst_on_start && !state.burstFired) {
     const burstCount = Math.min(node.burst_count, maxParticles)
     for (let index = 0; index < burstCount && state.particles.length < maxParticles; index += 1) {
-      state.particles.push(spawnPreviewParticle(node, width, height, random, null))
+      state.particles.push(spawnPreviewParticle(node, width, height, random, null, unitScale))
     }
     state.burstFired = true
   }
@@ -5378,7 +5424,7 @@ function stepComposerEmitterSim(
     const averageLife = (resolveEmitterMinLife(node) + resolveEmitterMaxLife(node)) * 0.5
     const warmCount = Math.min(Math.round(node.emission_rate * averageLife), maxParticles)
     for (let index = 0; index < warmCount && state.particles.length < maxParticles; index += 1) {
-      state.particles.push(spawnPreviewParticle(node, width, height, random, averageLife * random()))
+      state.particles.push(spawnPreviewParticle(node, width, height, random, averageLife * random(), unitScale))
     }
   }
 
@@ -5386,13 +5432,13 @@ function stepComposerEmitterSim(
   const spawnCount = Math.floor(state.accumulator)
   state.accumulator -= spawnCount
   for (let index = 0; index < spawnCount && state.particles.length < maxParticles; index += 1) {
-    state.particles.push(spawnPreviewParticle(node, width, height, random, null))
+    state.particles.push(spawnPreviewParticle(node, width, height, random, null, unitScale))
   }
 
   for (const particle of state.particles) {
     if (!particle.landed) {
-      particle.vx += node.gravity_x * dt
-      particle.vy += node.gravity_y * dt
+      particle.vx += node.gravity_x * unitScale * dt
+      particle.vy += node.gravity_y * unitScale * dt
       const dragScale = Math.min(1, Math.max(0, 1 - (node.drag * dt * 0.08)))
       particle.vx *= dragScale
       particle.vy *= dragScale
@@ -5412,6 +5458,7 @@ function buildComposerParticleBlockers(
   width: number,
   height: number,
   timeSeconds: number,
+  unitScale: number,
 ): ComposerParticleBlocker[] {
   const blockers: ComposerParticleBlocker[] = []
   for (const node of nodes) {
@@ -5425,7 +5472,7 @@ function buildComposerParticleBlockers(
     if (!image) {
       continue
     }
-    const layout = resolveComposerSpriteLayoutFromBounds(width, height, image, node, timeSeconds)
+    const layout = resolveComposerSpriteLayoutFromBounds(width, height, image, node, timeSeconds, unitScale)
     const region = resolveSpriteParticleRegionRect(layout, node.particle_region ?? null)
     blockers.push({
       x: region.x,

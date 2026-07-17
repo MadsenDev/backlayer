@@ -67,9 +67,32 @@ Preview fixes:
   the runtime's nominal-dt-per-rendered-frame behavior is still the
   remaining time-base difference.
 
-Still open from this audit: 1.2 (pixel units), 1.3 (blending space),
-1.6 (runtime time base), 1.7 (randomness), 4.4 (region/line clamps),
-4.5 (particle sprites), and the low-severity items in 2.4 and 3.4.
+## Fix log — round 3 (2026-07-17)
+
+The scene-semantics spec (`docs/scene-semantics-spec.md`) now exists and
+settles the outstanding decisions; these fixes implement it.
+
+- **1.2** pixel-unit fields (sprite `x`/`y`, drift/orbit amplitudes, emitter
+  `size`, `min/max_speed`, `gravity_*`) are now document-space values scaled
+  by `max(canvas) / max(document)` on both sides. The preview divides drag
+  deltas back into document space when moving sprites.
+- **1.6** the runtime particle simulation now integrates with the real
+  wall-clock frame delta clamped to 100 ms, matching the preview; dropped
+  frames no longer slow particles relative to behaviors.
+- **1.7** decided in the spec: patterns match statistically, not
+  particle-for-particle; exact stochastic reproducibility is out of scope.
+- **4.4** the runtime now clamps `region_radius`/`line_length` to [0.01, 1],
+  `region_width`/`region_height` to [0, 1], and `min_speed` ≥ 0, matching
+  the preview.
+- **New finding, fixed**: with `line_angle_deg` unset, the runtime fell back
+  to the preset's default line angle while the preview followed the
+  emitter's resolved direction; the runtime now follows the resolved
+  direction too.
+
+Still open from this audit: 1.3 (blending space — accepted divergence per
+spec §5, pending the shared-GPU-preview track), 4.5 (particle sprites,
+tracked as its own Milestone 1 item), and the low-severity items in 2.4
+and 3.4.
 
 ## How the two renderers relate
 

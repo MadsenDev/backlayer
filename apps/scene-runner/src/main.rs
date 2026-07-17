@@ -266,6 +266,13 @@ fn main() -> Result<()> {
         let mut gpu_runtime = GpuSceneRuntime::new(&session, &scene_runtime, debug_particle_areas)
             .context("failed to create native GPU scene runtime")?;
         scene_runtime.canvas_size = gpu_runtime.output_size();
+        scene_runtime.unit_scale = scene_unit_scale(
+            scene_runtime.canvas_size,
+            (
+                scene_runtime.document.width.max(1),
+                scene_runtime.document.height.max(1),
+            ),
+        );
         scene_runtime.update_emitters(1.0 / 120.0);
         gpu_runtime
             .render_scene(&scene_runtime, 0.0)
@@ -287,6 +294,7 @@ fn main() -> Result<()> {
         let hyprland = HyprlandClient::new();
         let power = PowerStateProbe::default();
         let mut next_frame_at = Instant::now() + frame_interval;
+        let mut last_frame_at: Option<Instant> = None;
         loop {
             session
                 .dispatch_pending()
@@ -300,7 +308,13 @@ fn main() -> Result<()> {
 
             if !paused && now >= next_frame_at {
                 let elapsed = started_at.elapsed().as_secs_f32();
-                let dt = frame_interval.as_secs_f32();
+                // Same time base as the composer preview: integrate with the
+                // real wall-clock frame delta, clamped so dropped frames (or a
+                // resume after pause) never jump the simulation.
+                let dt = last_frame_at
+                    .map(|at| now.duration_since(at).as_secs_f32().min(0.1))
+                    .unwrap_or_else(|| frame_interval.as_secs_f32());
+                last_frame_at = Some(now);
                 scene_runtime.update_emitters(dt);
                 gpu_runtime
                     .render_scene(&scene_runtime, elapsed)
@@ -516,6 +530,11 @@ struct NativeSceneRuntime {
     images: HashMap<String, RgbaImage>,
     emitters: Vec<EmitterState>,
     canvas_size: (u32, u32),
+    // Pixel-unit fields (sprite offsets, drift/orbit amplitudes, emitter
+    // size/speed/gravity) are authored against the document's own
+    // width/height. This long-edge ratio maps them onto the actual canvas so
+    // scenes keep the composition the composer showed at any output size.
+    unit_scale: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -649,6 +668,7 @@ impl NativeSceneRuntime {
                     state.particles.push(spawn_particle(
                         emitter,
                         self.canvas_size,
+                        self.unit_scale,
                         &mut state.seed,
                     ));
                 }
@@ -669,6 +689,7 @@ impl NativeSceneRuntime {
                     state.particles.push(spawn_particle_with_age(
                         emitter,
                         self.canvas_size,
+                        self.unit_scale,
                         &mut state.seed,
                         Some(warm_age),
                     ));
@@ -683,15 +704,18 @@ impl NativeSceneRuntime {
                 if state.particles.len() >= emitter.max_particles as usize {
                     break;
                 }
-                state
-                    .particles
-                    .push(spawn_particle(emitter, self.canvas_size, &mut state.seed));
+                state.particles.push(spawn_particle(
+                    emitter,
+                    self.canvas_size,
+                    self.unit_scale,
+                    &mut state.seed,
+                ));
             }
 
             for particle in &mut state.particles {
                 if !particle.landed {
-                    particle.vx += emitter.gravity_x * delta_seconds;
-                    particle.vy += emitter.gravity_y * delta_seconds;
+                    particle.vx += emitter.gravity_x * self.unit_scale * delta_seconds;
+                    particle.vy += emitter.gravity_y * self.unit_scale * delta_seconds;
                     let drag_scale = (1.0 - emitter.drag * delta_seconds * 0.08).clamp(0.0, 1.0);
                     particle.vx *= drag_scale;
                     particle.vy *= drag_scale;
@@ -754,10 +778,17 @@ fn load_native_scene_runtime(entrypoint: &Path) -> Result<Option<NativeSceneRunt
 
     Ok(Some(NativeSceneRuntime {
         canvas_size: (document.width.max(1), document.height.max(1)),
+        unit_scale: 1.0,
         document,
         images,
         emitters,
     }))
+}
+
+fn scene_unit_scale(canvas_size: (u32, u32), document_size: (u32, u32)) -> f32 {
+    let canvas_long_edge = canvas_size.0.max(canvas_size.1).max(1) as f32;
+    let document_long_edge = document_size.0.max(document_size.1).max(1) as f32;
+    canvas_long_edge / document_long_edge
 }
 
 impl GpuSceneRuntime {
@@ -1149,8 +1180,13 @@ impl GpuSceneRuntime {
                         let Some(bind_group) = self.image_bind_groups.get(&sprite.image_key) else {
                             continue;
                         };
-                        let (rect_w, rect_h, rect_x, rect_y, opacity) =
-                            scene_sprite_layout(self.surface_size, image, sprite, time_seconds);
+                        let (rect_w, rect_h, rect_x, rect_y, opacity) = scene_sprite_layout(
+                            self.surface_size,
+                            scene.unit_scale,
+                            image,
+                            sprite,
+                            time_seconds,
+                        );
                         let uniforms = SpriteUniforms {
                             surface_width: self.surface_size.0 as f32,
                             surface_height: self.surface_size.1 as f32,
@@ -1239,14 +1275,16 @@ impl GpuSceneRuntime {
 fn spawn_particle(
     emitter: &backlayer_types::SceneEmitterNode,
     canvas_size: (u32, u32),
+    unit_scale: f32,
     seed: &mut u64,
 ) -> SceneParticle {
-    spawn_particle_with_age(emitter, canvas_size, seed, None)
+    spawn_particle_with_age(emitter, canvas_size, unit_scale, seed, None)
 }
 
 fn spawn_particle_with_age(
     emitter: &backlayer_types::SceneEmitterNode,
     canvas_size: (u32, u32),
+    unit_scale: f32,
     seed: &mut u64,
     age_override: Option<f32>,
 ) -> SceneParticle {
@@ -1259,7 +1297,7 @@ fn spawn_particle_with_age(
     let angle = base_angle + (random(seed) - 0.5) * spread_radians;
     let min_speed = resolve_emitter_min_speed(emitter);
     let max_speed = resolve_emitter_max_speed(emitter);
-    let speed = min_speed + (random(seed) * (max_speed - min_speed));
+    let speed = (min_speed + (random(seed) * (max_speed - min_speed))) * unit_scale;
     let min_life = resolve_emitter_min_life(emitter);
     let max_life = resolve_emitter_max_life(emitter);
     let max_life_value = min_life + (random(seed) * (max_life - min_life));
@@ -1267,15 +1305,17 @@ fn spawn_particle_with_age(
     let drag_scale = (1.0 - emitter.drag * age * 0.08).max(0.0);
     let vx = speed * angle.cos() * drag_scale;
     let vy = speed * angle.sin() * drag_scale;
+    let gravity_x = emitter.gravity_x * unit_scale;
+    let gravity_y = emitter.gravity_y * unit_scale;
 
     SceneParticle {
-        x: spawn_x + (vx * age) + (0.5 * emitter.gravity_x * age * age),
-        y: spawn_y + (vy * age) + (0.5 * emitter.gravity_y * age * age),
+        x: spawn_x + (vx * age) + (0.5 * gravity_x * age * age),
+        y: spawn_y + (vy * age) + (0.5 * gravity_y * age * age),
         vx,
         vy,
         life: age,
         max_life: max_life_value,
-        size: emitter.size * (0.55 + random(seed) * 0.7),
+        size: emitter.size * unit_scale * (0.55 + random(seed) * 0.7),
         alpha: emitter.opacity * (0.55 + random(seed) * 0.45),
         landed: false,
     }
@@ -1293,7 +1333,8 @@ fn build_particle_blockers(scene: &NativeSceneRuntime) -> Vec<ParticleBlocker> {
         let Some(image) = scene.images.get(&sprite.image_key) else {
             continue;
         };
-        let (width, height, x, y, _) = scene_sprite_layout(scene.canvas_size, image, sprite, 0.0);
+        let (width, height, x, y, _) =
+            scene_sprite_layout(scene.canvas_size, scene.unit_scale, image, sprite, 0.0);
         let (x, y, width, height) =
             resolve_particle_blocker_rect((x, y, width, height), sprite.particle_region.as_ref());
         blockers.push(ParticleBlocker {
@@ -1685,17 +1726,17 @@ fn default_emitter_line_length(preset: &SceneEmitterPreset) -> f32 {
     }
 }
 
-fn default_emitter_line_angle_deg(preset: &SceneEmitterPreset) -> f32 {
-    default_emitter_direction_deg(preset)
-}
-
 fn resolve_emitter_min_speed(emitter: &backlayer_types::SceneEmitterNode) -> f32 {
-    emitter.min_speed.unwrap_or(match emitter.preset {
-        SceneEmitterPreset::Embers => 48.0,
-        SceneEmitterPreset::Rain => 320.0,
-        SceneEmitterPreset::Dust => 14.0,
-        SceneEmitterPreset::Snow => 20.0,
-    })
+    // Floor matches the composer preview's clamp.
+    emitter
+        .min_speed
+        .unwrap_or(match emitter.preset {
+            SceneEmitterPreset::Embers => 48.0,
+            SceneEmitterPreset::Rain => 320.0,
+            SceneEmitterPreset::Dust => 14.0,
+            SceneEmitterPreset::Snow => 20.0,
+        })
+        .max(0.0)
 }
 
 fn resolve_emitter_max_speed(emitter: &backlayer_types::SceneEmitterNode) -> f32 {
@@ -1878,15 +1919,18 @@ fn emitter_spawn_region(
     emitter: &backlayer_types::SceneEmitterNode,
     canvas_size: (u32, u32),
 ) -> (f32, f32) {
+    // Clamps match the composer preview's sanitation of normalized fields.
     (
         canvas_size.0 as f32
             * emitter
                 .region_width
-                .unwrap_or(default_emitter_region_width(&emitter.preset)),
+                .unwrap_or(default_emitter_region_width(&emitter.preset))
+                .clamp(0.0, 1.0),
         canvas_size.1 as f32
             * emitter
                 .region_height
-                .unwrap_or(default_emitter_region_height(&emitter.preset)),
+                .unwrap_or(default_emitter_region_height(&emitter.preset))
+                .clamp(0.0, 1.0),
     )
 }
 
@@ -1915,11 +1959,14 @@ fn sample_emitter_position(
             let length = canvas_size.0 as f32
                 * emitter
                     .line_length
-                    .unwrap_or(default_emitter_line_length(&emitter.preset));
+                    .unwrap_or(default_emitter_line_length(&emitter.preset))
+                    .clamp(0.01, 1.0);
+            // Like the preview, an unset line angle follows the emitter's
+            // resolved direction, not the preset default.
             let angle = emitter
                 .line_angle_deg
-                .unwrap_or(default_emitter_line_angle_deg(&emitter.preset))
-                .to_radians();
+                .map(|degrees| degrees.to_radians())
+                .unwrap_or_else(|| emitter_direction_radians(emitter));
             let offset = (random(seed) - 0.5) * length;
             (
                 origin_x + angle.cos() * offset,
@@ -1930,6 +1977,7 @@ fn sample_emitter_position(
             let radius = emitter
                 .region_radius
                 .unwrap_or(default_emitter_region_radius(&emitter.preset))
+                .clamp(0.01, 1.0)
                 * canvas_size.0.min(canvas_size.1) as f32;
             let theta = random(seed) * std::f32::consts::TAU;
             let distance = random(seed).sqrt() * radius;
@@ -2138,28 +2186,31 @@ fn create_sprite_pipeline(
 
 fn scene_sprite_layout(
     canvas_size: (u32, u32),
+    unit_scale: f32,
     image: &RgbaImage,
     sprite: &backlayer_types::SceneSpriteNode,
     time_seconds: f32,
 ) -> (f32, f32, f32, f32, f32) {
-    let mut x = sprite.x;
-    let mut y = sprite.y;
+    // Sprite offsets and drift/orbit amplitudes are document-space pixels;
+    // pulse `amount` is a unitless scale delta and stays unscaled.
+    let mut x = sprite.x * unit_scale;
+    let mut y = sprite.y * unit_scale;
     let mut scale = sprite.scale.max(0.1);
     let mut opacity = sprite.opacity.clamp(0.0, 1.0);
     for behavior in &sprite.behaviors {
         let phase = time_seconds * behavior.speed + behavior.phase;
         match behavior.kind {
             SceneBehaviorKind::Drift => {
-                x += phase.sin() * behavior.amount_x;
-                y += (phase * 0.85).cos() * behavior.amount_y;
+                x += phase.sin() * behavior.amount_x * unit_scale;
+                y += (phase * 0.85).cos() * behavior.amount_y * unit_scale;
             }
             SceneBehaviorKind::Pulse => {
                 scale += phase.sin() * behavior.amount;
                 opacity *= 0.9 + ((phase.sin() + 1.0) * 0.05);
             }
             SceneBehaviorKind::Orbit => {
-                x += phase.cos() * behavior.amount;
-                y += phase.sin() * behavior.amount_y.max(behavior.amount * 0.6);
+                x += phase.cos() * behavior.amount * unit_scale;
+                y += phase.sin() * behavior.amount_y.max(behavior.amount * 0.6) * unit_scale;
             }
         }
     }
@@ -3152,7 +3203,8 @@ mod tests {
 
     use super::{
         compose_scene_target, extract_scene_image_target, find_first_sibling_image,
-        load_native_scene_runtime, parse_tex_metadata, resolve_runtime_target,
+        load_native_scene_runtime, parse_tex_metadata, resolve_runtime_target, scene_sprite_layout,
+        scene_unit_scale, spawn_particle_with_age,
     };
 
     #[test]
@@ -3340,6 +3392,64 @@ mod tests {
         )));
 
         fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn unit_scale_uses_the_long_edge_ratio() {
+        assert_eq!(scene_unit_scale((2560, 1440), (1280, 720)), 2.0);
+        assert_eq!(scene_unit_scale((1280, 720), (1280, 720)), 1.0);
+        assert_eq!(scene_unit_scale((640, 360), (1280, 720)), 0.5);
+        // Portrait canvas against a landscape document still compares long
+        // edges, and degenerate sizes never divide by zero.
+        assert_eq!(scene_unit_scale((1440, 2560), (1280, 720)), 2.0);
+        assert_eq!(scene_unit_scale((1280, 720), (0, 0)), 1280.0);
+    }
+
+    #[test]
+    fn spawned_particles_scale_speed_size_and_gravity_by_unit_scale() {
+        let SceneNode::Emitter(emitter) = serde_json::from_str::<SceneNode>(
+            r##"{"kind":"emitter","id":"emit","name":"Snow","enabled":true,"preset":"snow",
+                 "emission_rate":24.0,"max_particles":32,"opacity":0.6,"size":3.0,"speed":80.0,
+                 "min_speed":40.0,"max_speed":80.0,"spread":40.0,
+                 "gravity_x":0.0,"gravity_y":10.0,"drag":0.0}"##,
+        )
+        .expect("emitter should deserialize") else {
+            panic!("node should be an emitter");
+        };
+
+        let mut base_seed = 42u64;
+        let mut scaled_seed = 42u64;
+        let base = spawn_particle_with_age(&emitter, (1280, 720), 1.0, &mut base_seed, None);
+        let scaled = spawn_particle_with_age(&emitter, (1280, 720), 2.0, &mut scaled_seed, None);
+
+        assert!((scaled.vx - base.vx * 2.0).abs() < 1e-3);
+        assert!((scaled.vy - base.vy * 2.0).abs() < 1e-3);
+        assert!((scaled.size - base.size * 2.0).abs() < 1e-3);
+        assert!((scaled.max_life - base.max_life).abs() < 1e-6);
+    }
+
+    #[test]
+    fn sprite_layout_scales_pixel_offsets_by_unit_scale() {
+        let SceneNode::Sprite(mut sprite) = serde_json::from_str::<SceneNode>(
+            r##"{"kind":"sprite","id":"sprite","name":"Sprite","enabled":true,"image_key":"base",
+                 "fit":"cover","blend":"alpha","x":10.0,"y":-6.0,"scale":1.0,"rotation_deg":0.0,
+                 "opacity":1.0,"behaviors":[]}"##,
+        )
+        .expect("sprite should deserialize") else {
+            panic!("node should be a sprite");
+        };
+        let image = RgbaImage::from_pixel(16, 16, Rgba([255, 255, 255, 255]));
+
+        let (_, _, offset_x, offset_y, _) = scene_sprite_layout((32, 32), 1.0, &image, &sprite, 0.0);
+        let (_, _, scaled_x, scaled_y, _) = scene_sprite_layout((32, 32), 2.0, &image, &sprite, 0.0);
+        sprite.x = 0.0;
+        sprite.y = 0.0;
+        let (_, _, origin_x, origin_y, _) = scene_sprite_layout((32, 32), 2.0, &image, &sprite, 0.0);
+
+        assert_eq!(offset_x - origin_x, 10.0);
+        assert_eq!(offset_y - origin_y, -6.0);
+        assert_eq!(scaled_x - origin_x, 20.0);
+        assert_eq!(scaled_y - origin_y, -12.0);
     }
 
     #[test]
