@@ -22,7 +22,7 @@ path, with the required key `base`), and an ordered `nodes` list of `sprite`,
   the base image's pixel dimensions here. They define the space pixel-unit
   fields are authored in (§2); they are *not* the output resolution.
 - Node order is meaningful: sprites and effects render in document order
-  (§6).
+  (§7).
 
 ## 2. Coordinate space and units
 
@@ -124,13 +124,48 @@ Fields are either **normalized** or **pixel-unit**:
   differ slightly. Closing this requires the shared-GPU-preview track and is
   out of scope for renderer-side fixes.
 
-## 6. Draw order
+## 6. Effects
+
+Effect nodes are full-canvas passes. Common inputs: `opacity` is clamped to
+[0, 1]; `intensity` is used as authored; `speed` is floored at 0.01 where it
+scales time. All positions below are pixel centers (`pixel + 0.5`) and
+`uv = pixel_center / canvas_size`. Each formula yields a per-pixel alpha
+`a`; the pass writes the resolved effect color (§5) with alpha `a` using
+alpha blending.
+
+- **Glow** — radial falloff from the canvas center:
+  `d = dist(pixel, center) / max(width, height)`,
+  `strength = max(0, 1 − 1.65·d)`,
+  `pulse = intensity · (0.78 + (sin(t·speed) + 1) · 0.11)`,
+  `a = strength² · opacity · pulse`.
+- **Vignette** — `d = dist(pixel, center) / length(center)`,
+  `a = clamp((d − 0.42) / 0.58, 0, 1)^1.8 · opacity · intensity`.
+- **Scanlines** — `offset = fract(t · speed · 0.35)`,
+  `phase = fract((uv.y + offset) · 96)`,
+  `band = 1 − smoothstep(0.28, 0.5, |phase − 0.5|)`,
+  `a = band · opacity · intensity · 0.18`. The alpha depends only on the
+  pixel row; the preview rasterizes it as one-pixel-tall rows.
+- **Fog** — a static vertical band profile shifted vertically by a
+  horizontal wave: `w = 0.03 · sin(uv.x · 5 + t · speed)`,
+  `band(y) = smoothstep(0.12, 0.72, y) · (1 − smoothstep(0.56, 1, y))`,
+  `a = band(uv.y − w) · opacity · intensity · 0.22`. Because the wave is a
+  pure shift, renderers may precompute the profile once per column of
+  pixels (the preview caches it as a 1-px-wide strip and draws
+  wave-shifted column strips; the runtime shifts every smoothstep edge by
+  `w` in the shader).
+
+Falloff gradients in the preview may approximate the continuous curves
+with piecewise-linear gradient stops (glow, vignette) and quantize the fog
+wave at narrow column strips; per-row/per-pixel alpha values must otherwise
+match the formulas exactly.
+
+## 7. Draw order
 
 1. Sprites and effects, in document order.
 2. All particles from all emitters, in one pass on top.
 3. (Preview only) selection/authoring overlays, never part of the scene.
 
-## 7. Occluders and landing surfaces
+## 8. Occluders and landing surfaces
 
 - Blockers come from sprites flagged `particle_occluder`/`particle_surface`
   (rect = laid-out sprite rect, optionally narrowed by `particle_region`)
@@ -144,7 +179,7 @@ Fields are either **normalized** or **pixel-unit**:
   dust land permanently (`y` pinned, `vx ×= 0.15`, `vy = 0`); rain and
   embers are killed on contact.
 
-## 8. Change discipline
+## 9. Change discipline
 
 When touching any behavior described here: update this spec in the same
 changeset, apply the change to both renderers (or log the divergence in

@@ -48,3 +48,36 @@ Use this as the release-hardening checklist for the current MVP.
 - Create a native shader wallpaper
 - Create and edit a native scene wallpaper
 - Confirm each created asset appears in the browser and can be assigned
+
+## Scene Parity: Composer Preview vs Wallpaper
+
+Author one scene in the Scene Composer that exercises each row, assign it,
+and compare the composer preview against the rendered wallpaper
+side-by-side. Expect a statistical match for particles (patterns are not
+particle-for-particle identical) and slightly softer stacked translucency
+at runtime (linear-space blending, spec §5). Reference:
+`docs/scene-semantics-spec.md`; log any new divergence in
+`docs/scene-parity-audit.md`.
+
+- Sprite placement: offsets, `scale`, `rotation_deg`, and each `fit` mode
+  land in the same relative position and size on both sides
+- Sprite behaviors: drift, pulse, and orbit move with the same amplitude,
+  direction, and cadence
+- Sprite blend modes: `add`/`screen` brighten additively; `alpha`/`multiply`
+  composite normally
+- Effects: glow radius/falloff and pulse cadence, vignette extent and
+  softness, scanline band width/drift speed, and fog band position and
+  wave motion all match; effect colors match the authored hex on both sides
+- Emitters: each preset (rain, snow, dust, embers) matches in particle
+  size, speed, direction, spread, and density at the same output aspect
+- Particle appearance: over-life size/alpha/color changes match; particles
+  glow additively and sit on top of all sprites and effects on both sides
+- Burst emission: `burst_count`/`burst_on_start` produce comparable bursts
+  at comparable times
+- Occluders and surfaces: particles hide behind occluder regions at the
+  same boundaries (enable `BACKLAYER_DEBUG_PARTICLE_AREAS=1` to see
+  runtime blocker outlines), and snow/dust land and stay landed on the
+  same surface edges while rain/embers die on contact
+- Resolution independence: assign the same scene to outputs of different
+  resolutions and confirm composition, particle sizes, and speeds keep the
+  authored proportions

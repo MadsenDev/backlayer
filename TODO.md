@@ -72,8 +72,12 @@ truth for scene evaluation.
       shapes, and over-life size/alpha/color curves — the preview now runs
       the same stateful simulation as `scene-runner`, and the runtime adopts
       the composer's default curves and curve sanitation
-- [ ] Match effect rendering between preview and runtime: glow, fog, tint,
-      and additive vs alpha blending
+- [x] Match effect rendering between preview and runtime: glow, fog, tint,
+      and additive vs alpha blending — effect formulas are now normative in
+      the spec (§6); the preview rasterizes scanlines per-row and fog from a
+      per-pixel profile strip, and the runtime's fog wave became a pure
+      vertical shift (gamma-vs-linear blending space remains the accepted
+      divergence per spec §5)
 - [x] Match coordinate space, scaling, and aspect handling between the
       preview viewport and the output surface — pixel-unit fields are now
       document-space and both renderers scale them by the canvas/document
@@ -88,8 +92,8 @@ truth for scene evaluation.
       scene engine) so parity holds by construction instead of by discipline
 - [ ] Add particle sprite/image support for native scene emitters — landed
       in the composer and `scene-runner` in the same changeset
-- [ ] Add a side-by-side preview-vs-runtime checklist to the manual
-      verification matrix
+- [x] Add a side-by-side preview-vs-runtime checklist to the manual
+      verification matrix — see "Scene Parity" in `docs/manual-testing.md`
 
 ### Video performance
 
